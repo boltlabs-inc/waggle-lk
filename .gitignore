@@ -52,3 +52,6 @@ waggle_dev
 prod.env
 dev.env
 test.env
+
+# Python venv
+*/venv
