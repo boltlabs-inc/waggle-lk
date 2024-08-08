@@ -1,0 +1,348 @@
+import argparse
+import requests
+
+# Tenant fields
+TENANT_NAME = "Game7"
+TENANT_DISPLAY_NAME = "Game7 Tenant"
+TENANT_DESCRIPTION = "Game7 purposes"
+DEFAULT_ZONE_NAME = "game7_zone"
+DEFAULT_ZONE_DESCRIPTION = "Game7 zone"
+
+# Domain fields
+DOMAIN_NAME = "game7_domain"
+DOMAIN_DESCRIPTION = "Game7 Domain"
+DOMAIN_AUTH_ENTITY_NAME_PREFIX = "game7_auth_entity"
+DOMAIN_AUTH_ENTITY_DESCRIPTION = "Game7 entity type to approve claims"
+
+# Policy fields
+POLICY_ADMIN_NAME = "domain_policy_admin"
+POLICY_APPROVER_NAME = "policy_approver"
+POLICY_APPROVER_DESCRIPTION = "Entity type to approve policies"
+POLICY_APPROVER_PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----\nMFYwEAYHKoZIzj0CAQYFK4EEAAoDQgAEEfw/MOmtobnF36IKi6WcN/sSbP2nrdSE\n3bKZV9X0j+bukH19wqtyp+JC6OiKY5E8LQn5bWM7ihBy2+0Tl0mHVQ==\n-----END PUBLIC KEY-----"
+POLICY_NAME = "noop_policy"
+
+# Service provider fields
+SERVICE_PROVIDER_USERNAME = "game7_service_provider"
+SERVICE_PROVIDER_PASSWORD = "password"
+
+
+def print_header(header):
+    print("")
+    print("############################################")
+    print(f"      {header}")
+    print("############################################")
+
+
+def login(login_url, username, password):
+    login_data = {
+        "username": username,
+        "password": password,
+        "grant_type": "password",
+    }
+    res = requests.post(login_url, data=login_data)
+    return res.json().get("access_token")
+
+
+def login_status_code(login_url, username, password):
+    login_data = {
+        "username": username,
+        "password": password,
+        "grant_type": "password",
+    }
+    res = requests.post(login_url, data=login_data)
+    return res.status_code
+
+
+def setup_lock_keeper(lock_keeper_url, super_admin_password):
+    print(f"Setting up Lock Keeper at {lock_keeper_url}")
+
+    print_header("Lock Keeper Setup")
+
+    # We first login as super admin to create the tenant
+    print("Logging in as Super Admin...")
+    super_admin_token = login(
+        f"{lock_keeper_url}/login", "super_admin", super_admin_password
+    )
+    print("Sucess!")
+
+    print_header("Tenant Setup")
+
+    # We first try logging in with the Tenant, if it succeeds, we skip the tenant creation
+    tenant_login_status_code = login_status_code(
+        f"{lock_keeper_url}/{TENANT_NAME}/login",
+        f"{TENANT_NAME}_Administrator",
+        "password",
+    )
+    if tenant_login_status_code != 200:
+        # Creates the tenant
+        print("Creating Tenant...")
+        req_body = {
+            "tenant_name": TENANT_NAME,
+            "display_name": TENANT_DISPLAY_NAME,
+            "description": TENANT_DESCRIPTION,
+            "default_zone_name": DEFAULT_ZONE_NAME,
+            "default_zone_description": DEFAULT_ZONE_DESCRIPTION,
+            "default_zone_key_servers": [
+                "key_server_1",
+                "key_server_2",
+                "key_server_3",
+            ],
+        }
+        res = requests.post(
+            f"{lock_keeper_url}/tenant",
+            json=req_body,
+            headers={"Authorization": f"Bearer {super_admin_token}"},
+        )
+        print("Tenant created!")
+
+        print("Updating Tenant Admin roles...")
+        # Login with the tenant admin
+        tenant_admin_token = login(
+            f"{lock_keeper_url}/{TENANT_NAME}/login",
+            f"{TENANT_NAME}_Administrator",
+            "password",
+        )
+
+        # Update the tenant admin roles
+        req_body = {
+            "username": f"{TENANT_NAME}_Administrator",
+            "password": "password",
+            "roles": ["Administrator", "AuthorizingAdmin", "Auditor"],
+        }
+        res = requests.put(
+            f"{lock_keeper_url}/api_user",
+            json=req_body,
+            headers={"Authorization": f"Bearer {tenant_admin_token}"},
+        )
+        print("Tenant Admin roles updated!")
+    else:
+        print(f"Tenant '{TENANT_NAME}' already exists!")
+        tenant_admin_token = login(
+            f"{lock_keeper_url}/{TENANT_NAME}/login",
+            f"{TENANT_NAME}_Administrator",
+            "password",
+        )
+
+    print_header("Domain Setup")
+
+    # We check if the domain exists, if not, we create it
+    res = requests.get(
+        f"{lock_keeper_url}/domain/{DOMAIN_NAME}",
+        headers={"Authorization": f"Bearer {tenant_admin_token}"},
+    )
+    if res.status_code != 200:
+        print("Creating Domain...")
+        req_body = {
+            "domain_name": DOMAIN_NAME,
+            "description": DOMAIN_DESCRIPTION,
+        }
+        res = requests.post(
+            f"{lock_keeper_url}/domain",
+            json=req_body,
+            headers={"Authorization": f"Bearer {tenant_admin_token}"},
+        )
+        print("Domain created!")
+
+        print("Logging in as Domain Admin...")
+        domain_admin_token = login(
+            f"{lock_keeper_url}/{TENANT_NAME}/{DOMAIN_NAME}/login",
+            f"{DOMAIN_NAME}_admin",
+            "password",
+        )
+        print("Sucess!")
+
+        print("Updating Domain Admin roles...")
+        req_body = {
+            "username": f"{DOMAIN_NAME}_admin",
+            "password": "password",
+            "roles": ["DomainAdmin", "AuthorizingAdmin"],
+        }
+        res = requests.put(
+            f"{lock_keeper_url}/api_user",
+            json=req_body,
+            headers={"Authorization": f"Bearer {domain_admin_token}"},
+        )
+        print("Domain Admin roles updated!")
+    else:
+        print(f"Domain '{DOMAIN_NAME}' already exists!")
+
+        print("Logging in as Domain Admin...")
+        domain_admin_token = login(
+            f"{lock_keeper_url}/{TENANT_NAME}/{DOMAIN_NAME}/login",
+            f"{DOMAIN_NAME}_admin",
+            "password",
+        )
+        print("Sucess!")
+
+    # We first check if the policy admin exists, if not, we create it
+    res = requests.get(
+        f"{lock_keeper_url}/api_user/{POLICY_ADMIN_NAME}",
+        headers={"Authorization": f"Bearer {domain_admin_token}"},
+    )
+    if res.status_code != 200:
+        print("Creating Policy Admin...")
+        req_body = {
+            "username": POLICY_ADMIN_NAME,
+            "password": "password",
+            "roles": ["DomainAdmin", "DomainPolicyAdmin", "AuthorizingAdmin"],
+        }
+        res = requests.post(
+            f"{lock_keeper_url}/api_user",
+            json=req_body,
+            headers={"Authorization": f"Bearer {domain_admin_token}"},
+        )
+        print("Policy Admin created!")
+    else:
+        print(f"Policy Admin '{POLICY_ADMIN_NAME}' already exists!")
+
+    print_header("Policy Approver Setup")
+
+    print("Logging in as Policy Admin...")
+    policy_admin_token = login(
+        f"{lock_keeper_url}/{TENANT_NAME}/{DOMAIN_NAME}/login",
+        POLICY_ADMIN_NAME,
+        "password",
+    )
+    print("Sucess!")
+
+    # We first check if the policy approver exists, if not, we create it
+    res = requests.get(
+        f"{lock_keeper_url}/authorizing_entity/{POLICY_APPROVER_NAME}",
+        headers={"Authorization": f"Bearer {policy_admin_token}"},
+    )
+    if res.status_code != 200:
+        print("Creating Policy Approver Authorizing Entity...")
+        req_body = {
+            "name": POLICY_APPROVER_NAME,
+            "description": POLICY_APPROVER_DESCRIPTION,
+            "entity_type": "PolicyApprover",
+        }
+        res = requests.post(
+            f"{lock_keeper_url}/authorizing_entity",
+            json=req_body,
+            headers={"Authorization": f"Bearer {policy_admin_token}"},
+        )
+        print("Policy Approver created!")
+
+        print("Setting one time passcode for Policy Approver Authorizing Entity...")
+        passcode_res = requests.put(
+            f"{lock_keeper_url}/authorizing_entity/{POLICY_APPROVER_NAME}/passcode",
+            headers={"Authorization": f"Bearer {policy_admin_token}"},
+        ).json()
+        print("One time passcode set!")
+
+        print("Setting public key for Policy Approver Authorizing Entity...")
+        req_body = {
+            "name": POLICY_APPROVER_NAME,
+            "passcode": passcode_res["passcode"],
+            "public_key": POLICY_APPROVER_PUBLIC_KEY,
+        }
+        upload_path_parameter = passcode_res.get("upload_path_parameter")
+        res = requests.put(
+            f"{lock_keeper_url}/authorizing_entity/public_key/{upload_path_parameter}",
+            json=req_body,
+            headers={"Authorization": f"Bearer {policy_admin_token}"},
+        )
+        print("Public key set!")
+    else:
+        print(f"Policy Approver '{POLICY_APPROVER_NAME}' already exists!")
+
+    print_header("Policy Setup")
+
+    # We first check if the policy exists, if not, we create it
+    res = requests.get(
+        f"{lock_keeper_url}/policy/{POLICY_NAME}",
+        headers={"Authorization": f"Bearer {policy_admin_token}"},
+    )
+    if res.status_code != 200:
+        print("Creating Tenant Policy...")
+        req_body = {
+            "serialized_policy": "eyJwb2xpY3lfbmFtZSI6Im5vb3BfcG9saWN5Iiwibm9uY2UiOjEsInRlbmFudF9hcHByb3ZhbHMiOnsicmVxdWlyZWQiOltdLCJvcHRpb25hbCI6W119LCJtaW5fb3B0aW9uYWxfYXBwcm92YWxzIjowfQ==",
+            "signature": "MEUCIQCR8a1yPZAwjouBO2e8doVbzQQ+1ybO1M2K5G2mFF/w6wIgckxm3UHPNzzkEwJeorUxvgj083dPut5Q3U8GMxL5A2Q=",
+        }
+        res = requests.post(
+            f"{lock_keeper_url}/policy",
+            json=req_body,
+            headers={"Authorization": f"Bearer {policy_admin_token}"},
+        )
+        print("Tenant Policy created!")
+    else:
+        print(f"Policy '{POLICY_NAME}' already exists!")
+
+    print_header("Service Provider Setup")
+
+    # We first try to login with the service provider, if it fails, we create it
+    service_provider_login_status_code = login_status_code(
+        f"{lock_keeper_url}/{TENANT_NAME}/login",
+        SERVICE_PROVIDER_USERNAME,
+        "password",
+    )
+    if service_provider_login_status_code != 200:
+        print("Creating Service Provider...")
+        req_body = {
+            "username": SERVICE_PROVIDER_USERNAME,
+            "password": SERVICE_PROVIDER_PASSWORD,
+            "roles": ["ServiceProvider", "Auditor"],
+        }
+        res = requests.post(
+            f"{lock_keeper_url}/api_user",
+            json=req_body,
+            headers={"Authorization": f"Bearer {tenant_admin_token}"},
+        )
+        print("Service Provider created!")
+    else:
+        print(f"Service Provider '{SERVICE_PROVIDER_USERNAME}' already exists!")
+
+    print_header("Roundtrip test")
+
+    # We try creating one key, and signing one transaction before wrapping up the script
+    print("Logging in with Service Provider...")
+    service_provider_token = login(
+        f"{lock_keeper_url}/{TENANT_NAME}/login",
+        SERVICE_PROVIDER_USERNAME,
+        SERVICE_PROVIDER_PASSWORD,
+    )
+
+    print("Generating a Key...")
+    req_body = {"domain_name": DOMAIN_NAME}
+    res = requests.post(
+        f"{lock_keeper_url}/generate",
+        json=req_body,
+        headers={"Authorization": f"Bearer {service_provider_token}"},
+    )
+    key_id = res.json().get("key_id")
+    print(f"Succesfully generated a key: {key_id}")
+
+    print("Signing a transaction...")
+    req_body = {
+        "transaction_payload": "f864805e3a9450ca976c38620194110af39ea90e1a66f1464edc80b844a9059cbb0000000000000000000000005b63c7a1ece17e892c99b4a17892000a5888da9400000000000000000000000000000000000000000000000000000000000000048205398080",
+        "authorizing_data": [],
+        "key_id": key_id,
+        "transaction_type": "EvmStandard",
+        "replacement_nonce": "123456",
+        "policies": [POLICY_NAME],
+    }
+    res = requests.post(
+        f"{lock_keeper_url}/sign",
+        json=req_body,
+        headers={"Authorization": f"Bearer {service_provider_token}"},
+    )
+    tx_hash = res.json().get("transaction_hash")
+    print(f"Transaction signed! transaction hash: 0x{tx_hash}")
+
+    print_header("Setup Complete! :)")
+
+
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser(
+        prog="Setup Lock Keeper",
+        description="Setup Lock Keeper with all required entities",
+    )
+
+    parser.add_argument("lock_keeper_url", type=str, help="Lock Keeper URL")
+    parser.add_argument("super_admin_password", type=str, help="Super Admin Password")
+
+    args = parser.parse_args()
+
+    setup_lock_keeper(args.lock_keeper_url, args.super_admin_password)
