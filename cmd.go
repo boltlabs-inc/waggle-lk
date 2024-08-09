@@ -144,7 +144,7 @@ func CreateSignCommand() *cobra.Command {
 	// All variables to be used for arguments.
 	var chainId int64
 	var batchSize int
-	var bugoutToken, cursorName, journalID, keyfile, password, claimant, dropperAddress, dropId, requestId, blockDeadline, amount, infile, outfile, query string
+	var bugoutToken, cursorName, journalID, keyfile, password, claimant, dropperAddress, dropId, requestId, blockDeadline, amount, infile, outfile, query, keyId string
 	var sensible, hashFlag, isCSV, header bool
 
 	signCommand.PersistentFlags().StringVarP(&keyfile, "keystore", "k", "", "Path to keystore file (this should be a JSON file).")
@@ -372,8 +372,6 @@ func CreateSignCommand() *cobra.Command {
 				return err
 			}
 
-			keyId := "2a13889e-250a-4195-9fbc-7522ce04e91f"
-
 			signedMessage, err := SignTypedMessage(messageData, keyId, accessToken)
 			if err != nil {
 				return err
@@ -392,11 +390,11 @@ func CreateSignCommand() *cobra.Command {
 			if encodeErr != nil {
 				return encodeErr
 			}
-			os.Stdout.Write([]byte("Test"))
 			os.Stdout.Write(resultJSON)
 			return nil
 		},
 	}
+	dropperSingleLkSubcommand.Flags().StringVar(&keyId, "key-id", "", "LockKeeper Key ID to use for signing.")
 	dropperSingleLkSubcommand.Flags().Int64Var(&chainId, "chain-id", 1, "Chain ID of the network you are signing for.")
 	dropperSingleLkSubcommand.Flags().StringVar(&dropperAddress, "dropper", "0x0000000000000000000000000000000000000000", "Address of Dropper contract")
 	dropperSingleLkSubcommand.Flags().StringVar(&dropId, "drop-id", "0", "ID of the drop.")
@@ -476,8 +474,6 @@ func CreateSignCommand() *cobra.Command {
 				return err
 			}
 
-			keyId := "2a13889e-250a-4195-9fbc-7522ce04e91f"
-
 			for _, message := range batch {
 				_, messageData, hashErr := DropperClaimMessageHash(chainId, dropperAddress, message.DropId, message.RequestID, message.Claimant, message.BlockDeadline, message.Amount)
 				if hashErr != nil {
@@ -507,6 +503,7 @@ func CreateSignCommand() *cobra.Command {
 			return nil
 		},
 	}
+	dropperBatchLkSubcommand.Flags().StringVar(&keyId, "key-id", "", "LockKeeper Key ID to use for signing.")
 	dropperBatchLkSubcommand.Flags().Int64Var(&chainId, "chain-id", 1, "Chain ID of the network you are signing for.")
 	dropperBatchLkSubcommand.Flags().StringVar(&dropperAddress, "dropper", "0x0000000000000000000000000000000000000000", "Address of Dropper contract")
 	dropperBatchLkSubcommand.Flags().StringVar(&infile, "infile", "", "Input file. If not specified, input will be expected from stdin.")
