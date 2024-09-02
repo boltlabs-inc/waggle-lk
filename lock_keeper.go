@@ -21,7 +21,6 @@ func Login() (string, error) {
 		return "", err
 	}
 
-	//TODO: Move these to environment variables
 	loginData := url.Values{
 		"username":   {lockKeeperConfig.Username},
 		"password":   {lockKeeperConfig.Password},
@@ -52,6 +51,10 @@ func Login() (string, error) {
 }
 
 func SignTypedMessage(message apitypes.TypedData, keyId string, accessToken string) (string, error) {
+	if keyId == "" {
+		return "", fmt.Errorf("lock keeper key-id is required")
+	}
+
 	lockKeeperConfig, err := LoadLockKeeperConfig()
 	if err != nil {
 		return "", err
