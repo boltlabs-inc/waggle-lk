@@ -8,27 +8,28 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
+	"github.com/joho/godotenv"
 )
 
 func Login() (string, error) {
-	//TODO: Move these to environment variables
-	lockKeeperURL := "http://localhost:3000"
-	tenantName := "Game7"
-	serviceProviderUsername := "game7_service_provider"
-	serviceProviderPassword := "password"
+	lockKeeperConfig, err := LoadLockKeeperConfig()
+	if err != nil {
+		return "", err
+	}
 
 	//TODO: Move these to environment variables
 	loginData := url.Values{
-		"username":   {serviceProviderUsername},
-		"password":   {serviceProviderPassword},
+		"username":   {lockKeeperConfig.Username},
+		"password":   {lockKeeperConfig.Password},
 		"grant_type": {"password"},
 	}
 
 	res, postErr := http.PostForm(
-		fmt.Sprintf("%s/%s/login", lockKeeperURL, tenantName),
+		fmt.Sprintf("%s/%s/login", lockKeeperConfig.URL, lockKeeperConfig.Tenant),
 		loginData,
 	)
 	if postErr != nil {
@@ -51,9 +52,10 @@ func Login() (string, error) {
 }
 
 func SignTypedMessage(message apitypes.TypedData, keyId string, accessToken string) (string, error) {
-	// TODO: Move this to environment variable
-	lockKeeperURL := "http://localhost:3000"
-	policyName := "noop_policy"
+	lockKeeperConfig, err := LoadLockKeeperConfig()
+	if err != nil {
+		return "", err
+	}
 
 	jsonBytes, serializeErr := SerializeTypedDataWithoutSalt(message)
 	if serializeErr != nil {
@@ -66,7 +68,7 @@ func SignTypedMessage(message apitypes.TypedData, keyId string, accessToken stri
 		"authorizing_data": []interface{}{},
 		"key_id":           keyId,
 		"message_type":     "Standard",
-		"policies":         []string{policyName},
+		"policies":         []string{lockKeeperConfig.Policy},
 	}
 
 	reqBodyJson, serializeErr := json.Marshal(reqBody)
@@ -74,7 +76,7 @@ func SignTypedMessage(message apitypes.TypedData, keyId string, accessToken stri
 		return "", serializeErr
 	}
 
-	req, reqErr := http.NewRequest("POST", lockKeeperURL+"/sign_message", bytes.NewBuffer(reqBodyJson))
+	req, reqErr := http.NewRequest("POST", lockKeeperConfig.URL+"/sign_message", bytes.NewBuffer(reqBodyJson))
 	if reqErr != nil {
 		return "", reqErr
 	}
@@ -104,6 +106,7 @@ func SignTypedMessage(message apitypes.TypedData, keyId string, accessToken stri
 
 // In order to sign the typed message with LockKeeper, we need to serialize
 // the typed data message without the salt field in the 'domain' object.
+// so we need to create a custom typed data struct to serialize the typed data
 type CustomDomain struct {
 	Name              string                `json:"name,omitempty"`
 	Version           string                `json:"version,omitempty"`
@@ -134,4 +137,47 @@ func SerializeTypedDataWithoutSalt(original apitypes.TypedData) ([]byte, error) 
 	}
 
 	return json.Marshal(customTypedData)
+}
+
+// To facilitate the LockKeeper integration, we need to load the configuration
+// from the environment variables
+type LockKeeperConfig struct {
+	URL      string
+	Tenant   string
+	Username string
+	Password string
+	Policy   string
+}
+
+func LoadLockKeeperConfig() (*LockKeeperConfig, error) {
+	godotenv.Load()
+
+	config := &LockKeeperConfig{}
+	var err error
+
+	if config.URL, err = getEnv("LOCK_KEEPER_URL"); err != nil {
+		return nil, err
+	}
+	if config.Tenant, err = getEnv("LOCK_KEEPER_TENANT"); err != nil {
+		return nil, err
+	}
+	if config.Username, err = getEnv("LOCK_KEEPER_USERNAME"); err != nil {
+		return nil, err
+	}
+	if config.Password, err = getEnv("LOCK_KEEPER_PASSWORD"); err != nil {
+		return nil, err
+	}
+	if config.Policy, err = getEnv("LOCK_KEEPER_POLICY"); err != nil {
+		return nil, err
+	}
+
+	return config, nil
+}
+
+func getEnv(key string) (string, error) {
+	value, exists := os.LookupEnv(key)
+	if !exists {
+		return "", fmt.Errorf("missing enviroment variable: %s", key)
+	}
+	return value, nil
 }
