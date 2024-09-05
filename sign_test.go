@@ -6,7 +6,7 @@ import (
 )
 
 func TestDropperClaimMessageHash(t *testing.T) {
-	messageHash, err := DropperClaimMessageHash(80001, "0x4ec36E288E1b5d6914851a141cb041152Cf95328", "2", "5", "0x000000000000000000000000000000000000dEaD", "40000000", "3000000000000000000")
+	messageHash, _, err := DropperClaimMessageHash(80001, "0x4ec36E288E1b5d6914851a141cb041152Cf95328", "2", "5", "0x000000000000000000000000000000000000dEaD", "40000000", "3000000000000000000")
 	if err != nil {
 		t.Errorf("Unexpected error in DropperClaimMessageHash: %s", err.Error())
 	}

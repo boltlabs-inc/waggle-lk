@@ -471,7 +471,7 @@ func (server *Server) signDropperRoute(w http.ResponseWriter, r *http.Request, s
 	var callRequestSpecifications []CallRequestSpecification
 
 	for i, message := range req.Requests {
-		messageHash, hashErr := DropperClaimMessageHash(req.ChainId, req.Dropper, message.DropId, message.RequestID, message.Claimant, message.BlockDeadline, message.Amount)
+		messageHash, _, hashErr := DropperClaimMessageHash(req.ChainId, req.Dropper, message.DropId, message.RequestID, message.Claimant, message.BlockDeadline, message.Amount)
 		if hashErr != nil {
 			http.Error(w, "Unable to generate message hash", http.StatusInternalServerError)
 			return
