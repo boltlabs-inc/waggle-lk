@@ -108,7 +108,7 @@ type DropperClaimMessage struct {
 	Signer        string `json:"signer,omitempty"`
 }
 
-func DropperClaimMessageHash(chainId int64, dropperAddress string, dropId, requestId string, claimant string, blockDeadline, amount string) ([]byte, error) {
+func DropperClaimMessageHash(chainId int64, dropperAddress string, dropId, requestId string, claimant string, blockDeadline, amount string) ([]byte, apitypes.TypedData, error) {
 	// Inspired by: https://medium.com/alpineintel/issuing-and-verifying-eip-712-challenges-with-go-32635ca78aaf
 	signerData := apitypes.TypedData{
 		Types: apitypes.Types{
@@ -143,5 +143,5 @@ func DropperClaimMessageHash(chainId int64, dropperAddress string, dropId, reque
 	}
 
 	messageHash, _, err := apitypes.TypedDataAndHash(signerData)
-	return messageHash, err
+	return messageHash, signerData, err
 }
