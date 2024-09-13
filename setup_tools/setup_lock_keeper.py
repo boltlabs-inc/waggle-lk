@@ -1,5 +1,13 @@
 import argparse
+import base64
+import json
 import requests
+import getpass
+
+from eth_keyfile import load_keyfile, decode_keyfile_json
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
 
 # Tenant fields
 TENANT_NAME = "Game7"
@@ -7,6 +15,12 @@ TENANT_DISPLAY_NAME = "Game7 Tenant"
 TENANT_DESCRIPTION = "Game7 purposes"
 DEFAULT_ZONE_NAME = "game7_zone"
 DEFAULT_ZONE_DESCRIPTION = "Game7 zone"
+
+# Authorizing Entity fields
+AUTH_ENTITY_TYPE_NAME = "approver_auth_entity_type"
+AUTH_ENTITY_TYPE_DESCRIPTION = "Approver Auth Entity Type"
+AUTH_ENTITY_NAME = "approver_auth_entity"
+AUTH_ENTITY_DESCRIPTION = "Entity type to approve waggle claims"
 
 # Domain fields
 DOMAIN_NAME = "game7_domain"
@@ -20,6 +34,7 @@ POLICY_APPROVER_NAME = "policy_approver"
 POLICY_APPROVER_DESCRIPTION = "Entity type to approve policies"
 POLICY_APPROVER_PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----\nMFYwEAYHKoZIzj0CAQYFK4EEAAoDQgAEEfw/MOmtobnF36IKi6WcN/sSbP2nrdSE\n3bKZV9X0j+bukH19wqtyp+JC6OiKY5E8LQn5bWM7ihBy2+0Tl0mHVQ==\n-----END PUBLIC KEY-----"
 POLICY_NAME = "noop_policy"
+APPROVER_POLICY_NAME = "approver_policy"
 
 # Service provider fields
 SERVICE_PROVIDER_USERNAME = "game7_service_provider"
@@ -53,8 +68,44 @@ def login_status_code(login_url, username, password):
     return res.status_code
 
 
-def setup_lock_keeper(lock_keeper_url, super_admin_password):
+def decrypt_keystore(key_file):
+    with open(key_file, "r") as file:
+        keystore = load_keyfile(file)
+
+    password = getpass.getpass("Enter password for the approvers keystore: ")
+    try:
+        private_key = decode_keyfile_json(keystore, password.encode("utf-8"))
+    except ValueError:
+        print("Invalid approvers password, aborting process!")
+        return None
+
+    return private_key.hex()
+
+
+def private_key_to_pem_public_key(private_key):
+    private_key_bytes = bytes.fromhex(private_key)
+
+    private_key = ec.derive_private_key(
+        int.from_bytes(private_key_bytes, byteorder="big"),
+        ec.SECP256K1(),
+        default_backend(),
+    )
+    public_key = private_key.public_key()
+
+    # Convert the public key to PEM format
+    pem_public_key = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+
+    return pem_public_key.decode("utf-8")
+
+
+def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
     print(f"Setting up Lock Keeper at {lock_keeper_url}")
+
+    print("Decrypting approver keystore...")
+    private_key = decrypt_keystore(key_file)
 
     print_header("Lock Keeper Setup")
 
@@ -122,6 +173,76 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password):
             f"{TENANT_NAME}_Administrator",
             "password",
         )
+
+    print_header("Authorizing Entity Type Setup")
+
+    # We first try getting the Authorizing Entity Type, if it exists, we skip the creation
+    res = requests.get(
+        f"{lock_keeper_url}/authorizing_entity/type/{AUTH_ENTITY_TYPE_NAME}",
+        headers={"Authorization": f"Bearer {tenant_admin_token}"},
+    )
+    if res.status_code != 200:
+        print("Creating Authorizing Entity Type...")
+        req_body = {
+            "name": AUTH_ENTITY_TYPE_NAME,
+            "description": AUTH_ENTITY_TYPE_DESCRIPTION,
+        }
+        res = requests.post(
+            f"{lock_keeper_url}/authorizing_entity/type",
+            json=req_body,
+            headers={"Authorization": f"Bearer {tenant_admin_token}"},
+        )
+        print("Authorizing Entity Type created!")
+    else:
+        print(f"Authorizing Entity Type '{AUTH_ENTITY_TYPE_NAME}' already exists!")
+
+    print_header("Approver Authorizing Entity Setup")
+
+    # We check if the authorizing entity exists, if not, we create it
+    res = requests.get(
+        f"{lock_keeper_url}/authorizing_entity/{AUTH_ENTITY_NAME}",
+        headers={"Authorization": f"Bearer {tenant_admin_token}"},
+    )
+    if res.status_code != 200:
+        print("Creating Approver Authorizing Entity...")
+        req_body = {
+            "name": AUTH_ENTITY_NAME,
+            "description": AUTH_ENTITY_DESCRIPTION,
+            "entity_type": AUTH_ENTITY_TYPE_NAME,
+        }
+        res = requests.post(
+            f"{lock_keeper_url}/authorizing_entity",
+            json=req_body,
+            headers={"Authorization": f"Bearer {tenant_admin_token}"},
+        )
+        print("Approver Authorizing Entity created!")
+
+        print("Setting one time passcode for Approver Authorizing Entity...")
+        passcode_res = requests.put(
+            f"{lock_keeper_url}/authorizing_entity/{AUTH_ENTITY_NAME}/passcode",
+            headers={"Authorization": f"Bearer {tenant_admin_token}"},
+        )
+        print("One time passcode set!")
+
+        print("Setting public key for Approver Authorizing Entity...")
+
+        # Convert the private key to a PEM encoded public key
+        auth_entity_public_key = private_key_to_pem_public_key(private_key)
+
+        req_body = {
+            "name": AUTH_ENTITY_NAME,
+            "passcode": passcode_res.json()["passcode"],
+            "public_key": auth_entity_public_key,
+        }
+        upload_path_parameter = passcode_res.json().get("upload_path_parameter")
+        res = requests.put(
+            f"{lock_keeper_url}/authorizing_entity/public_key/{upload_path_parameter}",
+            json=req_body,
+            headers={"Authorization": f"Bearer {tenant_admin_token}"},
+        )
+        print("Public key set!")
+    else:
+        print(f"Authorizing Entity '{AUTH_ENTITY_NAME}' already exists!")
 
     print_header("Domain Setup")
 
@@ -247,7 +368,7 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password):
     else:
         print(f"Policy Approver '{POLICY_APPROVER_NAME}' already exists!")
 
-    print_header("Policy Setup")
+    print_header("Noop Policy Setup")
 
     # We first check if the policy exists, if not, we create it
     res = requests.get(
@@ -256,6 +377,14 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password):
     )
     if res.status_code != 200:
         print("Creating Tenant Policy...")
+        # This is what the noop policy object looks like
+        # {
+        #     "policy_name": "noop_policy",
+        #     "nonce": 1,
+        #     "tenant_approvals": {"required": [], "optional": []},
+        #     "domain_approvals": {"required": [], "optional": []},
+        #     "min_optional_approvals": 0,
+        # }
         req_body = {
             "serialized_policy": "eyJwb2xpY3lfbmFtZSI6Im5vb3BfcG9saWN5Iiwibm9uY2UiOjEsInRlbmFudF9hcHByb3ZhbHMiOnsicmVxdWlyZWQiOltdLCJvcHRpb25hbCI6W119LCJtaW5fb3B0aW9uYWxfYXBwcm92YWxzIjowfQ==",
             "signature": "MEUCIQCR8a1yPZAwjouBO2e8doVbzQQ+1ybO1M2K5G2mFF/w6wIgckxm3UHPNzzkEwJeorUxvgj083dPut5Q3U8GMxL5A2Q=",
@@ -268,6 +397,36 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password):
         print("Tenant Policy created!")
     else:
         print(f"Policy '{POLICY_NAME}' already exists!")
+
+    print_header("Approver Policy Setup")
+
+    # We first check if the approver policy exists, if not, we create it
+    res = requests.get(
+        f"{lock_keeper_url}/policy/{APPROVER_POLICY_NAME}",
+        headers={"Authorization": f"Bearer {policy_admin_token}"},
+    )
+    if res.status_code != 200:
+        print("Creating Approver Policy...")
+        # This is what the approver policy object looks like
+        # {
+        #     "policy_name": "approver_policy",
+        #     "nonce": 2,
+        #     "tenant_approvals": {"required": ["approver_auth_entity"], "optional": []},
+        #     "domain_approvals": {"required": [], "optional": []},
+        #     "min_optional_approvals": 0,
+        # }
+        req_body = {
+            "serialized_policy": "eyJwb2xpY3lfbmFtZSI6ImFwcHJvdmVyX3BvbGljeSIsIm5vbmNlIjoyLCJ0ZW5hbnRfYXBwcm92YWxzIjp7InJlcXVpcmVkIjpbImFwcHJvdmVyX2F1dGhfZW50aXR5Il0sIm9wdGlvbmFsIjpbXX0sImRvbWFpbl9hcHByb3ZhbHMiOnsicmVxdWlyZWQiOltdLCJvcHRpb25hbCI6W119LCJtaW5fb3B0aW9uYWxfYXBwcm92YWxzIjowfQ==",
+            "signature": "MEQCIHPYDwiIxRKmMpWwLZA1kTUkw0NruoVIjf44dxzZXjPnAiBdNTkT9s3viwIgAd1Oql70bH/aKwb/CywHclFbokuF8Q==",
+        }
+        res = requests.post(
+            f"{lock_keeper_url}/policy",
+            json=req_body,
+            headers={"Authorization": f"Bearer {policy_admin_token}"},
+        )
+        print("Approver Policy created!")
+    else:
+        print(f"Policy '{APPROVER_POLICY_NAME}' already exists!")
 
     print_header("Service Provider Setup")
 
@@ -313,7 +472,7 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password):
     key_id = res.json().get("key_id")
     print(f"Succesfully generated a key: {key_id}")
 
-    print("Signing a transaction...")
+    print("Signing a transaction with noop policy...")
     req_body = {
         "transaction_payload": "f864805e3a9450ca976c38620194110af39ea90e1a66f1464edc80b844a9059cbb0000000000000000000000005b63c7a1ece17e892c99b4a17892000a5888da9400000000000000000000000000000000000000000000000000000000000000048205398080",
         "authorizing_data": [],
@@ -342,7 +501,8 @@ if __name__ == "__main__":
 
     parser.add_argument("lock_keeper_url", type=str, help="Lock Keeper URL")
     parser.add_argument("super_admin_password", type=str, help="Super Admin Password")
+    parser.add_argument("key_file", type=str, help="Path to the approver keystore file")
 
     args = parser.parse_args()
 
-    setup_lock_keeper(args.lock_keeper_url, args.super_admin_password)
+    setup_lock_keeper(args.lock_keeper_url, args.super_admin_password, args.key_file)
