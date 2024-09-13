@@ -7,6 +7,8 @@ It will create the following entities in Lock Keeper;
 - A new Tenant with the name `Game7`
 - A new Domain with the name `game7_domain`
 - A new empty Policy called `noop_policy`
+- A new policy that requires an approver called `approver_policy`
+    - the approver key used will be the provided as a keystore file created by the tool
 - A new Service Provider with the following info:
     - username: `game7_service_provider`
     - password: `password`
