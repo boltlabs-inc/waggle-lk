@@ -3,5 +3,7 @@ ecdsa
 eth-keyfile
 eth-keys
 eth-utils
+eth-abi
+eth-account
 requests
 

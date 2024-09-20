@@ -8,6 +8,10 @@ from eth_keyfile import load_keyfile, decode_keyfile_json
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
+from eth_utils.crypto import keccak
+from ecdsa import SigningKey, SECP256k1
+from ecdsa.util import sigencode_der_canonize
+from eth_account.messages import encode_defunct, _hash_eip191_message
 
 # Tenant fields
 TENANT_NAME = "Game7"
@@ -101,6 +105,76 @@ def private_key_to_pem_public_key(private_key):
     return pem_public_key.decode("utf-8")
 
 
+def get_mock_sign_request_typed_data():
+    message_dict = {
+        "domain": {
+            "name": "Moonstream Dropper",
+            "version": "0.2.0",
+            "chainId": "0xaa36a7",
+            "verifyingContract": "0x1e01dd2F620014bcA0579bBa7b982d5702fe744c",
+        },
+        "message": {
+            "amount": "3000",
+            "blockDeadline": "400000000",
+            "claimant": "0x85AFAdD55A1693d227eF97361d56D0a5a6FDa104",
+            "dropId": "1",
+            "requestID": "279927661987246322371885526670387588087",
+        },
+        "types": {
+            "ClaimPayload": [
+                {"name": "dropId", "type": "uint256"},
+                {"name": "requestID", "type": "uint256"},
+                {"name": "claimant", "type": "address"},
+                {"name": "blockDeadline", "type": "uint256"},
+                {"name": "amount", "type": "uint256"},
+            ],
+            "EIP712Domain": [
+                {"name": "name", "type": "string"},
+                {"name": "version", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+                {"name": "verifyingContract", "type": "address"},
+            ],
+        },
+        "primaryType": "ClaimPayload",
+    }
+    return message_dict
+
+
+def get_authorizing_data(typed_data, private_key):
+    # Let's first prepare the typed data to be signed by creating its metadata
+    content_hash = encode_defunct(text=json.dumps(typed_data))
+    content_hash = keccak(content_hash.body).hex()
+    # The content hash is the 712 encoded json object
+    metadata = {
+        "order_id": "1",
+        "content_hash": content_hash,
+        "approval_status": "1",
+        "status_reason": "Approved",
+    }
+    base_64_metadata = base64.b64encode(json.dumps(metadata).encode("utf-8"))
+
+    # Then let's sign it using the private key
+    private_key_bytes = bytes.fromhex(private_key)
+    private_key = SigningKey.from_string(private_key_bytes, curve=SECP256k1)
+
+    # Before signing, we need to hash the base64 metadata object
+    hashed_metadata = keccak(base_64_metadata)
+    # ⚠️: try without hashing, maybe line 167 is already doing that
+
+    # Sign the hashed typed data
+    signature = private_key.sign(hashed_metadata, sigencode=sigencode_der_canonize)
+
+    # Base64 encode the DER-formatted signature
+    signature = base64.b64encode(signature).decode("utf-8")
+
+    return {
+        "authorizing_entity": AUTH_ENTITY_NAME,
+        "level": "Tenant",
+        "metadata": base_64_metadata.hex(),
+        "metadata_signature": signature,
+    }
+
+
 def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
     print(f"Setting up Lock Keeper at {lock_keeper_url}")
 
@@ -130,6 +204,7 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
         req_body = {
             "tenant_name": TENANT_NAME,
             "display_name": TENANT_DISPLAY_NAME,
+            "tenant_admin_email": "tenant@test.com",
             "description": TENANT_DESCRIPTION,
             "default_zone_name": DEFAULT_ZONE_NAME,
             "default_zone_description": DEFAULT_ZONE_DESCRIPTION,
@@ -161,7 +236,7 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
             "roles": ["Administrator", "AuthorizingAdmin", "Auditor"],
         }
         res = requests.put(
-            f"{lock_keeper_url}/api_user",
+            f"{lock_keeper_url}/user_account",
             json=req_body,
             headers={"Authorization": f"Bearer {tenant_admin_token}"},
         )
@@ -256,6 +331,7 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
         req_body = {
             "domain_name": DOMAIN_NAME,
             "description": DOMAIN_DESCRIPTION,
+            "domain_admin_email": "domain@test.com",
         }
         res = requests.post(
             f"{lock_keeper_url}/domain",
@@ -279,7 +355,7 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
             "roles": ["DomainAdmin", "AuthorizingAdmin"],
         }
         res = requests.put(
-            f"{lock_keeper_url}/api_user",
+            f"{lock_keeper_url}/user_account",
             json=req_body,
             headers={"Authorization": f"Bearer {domain_admin_token}"},
         )
@@ -297,7 +373,7 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
 
     # We first check if the policy admin exists, if not, we create it
     res = requests.get(
-        f"{lock_keeper_url}/api_user/{POLICY_ADMIN_NAME}",
+        f"{lock_keeper_url}/user_account/{POLICY_ADMIN_NAME}",
         headers={"Authorization": f"Bearer {domain_admin_token}"},
     )
     if res.status_code != 200:
@@ -305,10 +381,11 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
         req_body = {
             "username": POLICY_ADMIN_NAME,
             "password": "password",
+            "user_type": "api_user",
             "roles": ["DomainAdmin", "DomainPolicyAdmin", "AuthorizingAdmin"],
         }
         res = requests.post(
-            f"{lock_keeper_url}/api_user",
+            f"{lock_keeper_url}/user_account",
             json=req_body,
             headers={"Authorization": f"Bearer {domain_admin_token}"},
         )
@@ -441,10 +518,11 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
         req_body = {
             "username": SERVICE_PROVIDER_USERNAME,
             "password": SERVICE_PROVIDER_PASSWORD,
+            "user_type": "api_user",
             "roles": ["ServiceProvider", "Auditor"],
         }
         res = requests.post(
-            f"{lock_keeper_url}/api_user",
+            f"{lock_keeper_url}/user_account",
             json=req_body,
             headers={"Authorization": f"Bearer {tenant_admin_token}"},
         )
@@ -488,6 +566,28 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
     )
     tx_hash = res.json().get("transaction_hash")
     print(f"Transaction signed! transaction hash: 0x{tx_hash}")
+
+    print("Signing a transaction with approver policy...")
+    typed_data = get_mock_sign_request_typed_data()
+    authorizing_data = get_authorizing_data(typed_data, private_key)
+
+    typed_data_json = json.dumps(typed_data)
+    base_64_typed_data = base64.b64encode(typed_data_json.encode("utf-8")).decode(
+        "utf-8"
+    )
+    req_body = {
+        "typed_data": base_64_typed_data,
+        "authorizing_data": [authorizing_data],
+        "key_id": key_id,
+        "message_type": "Standard",
+        "policies": [APPROVER_POLICY_NAME],
+    }
+    res = requests.post(
+        f"{lock_keeper_url}/sign_message",
+        json=req_body,
+        headers={"Authorization": f"Bearer {service_provider_token}"},
+    )
+    print(res.text)
 
     print_header("Setup Complete! :)")
 
