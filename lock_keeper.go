@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 
+	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 	"github.com/joho/godotenv"
@@ -105,6 +106,10 @@ func SignTypedMessage(message apitypes.TypedData, keyId string, accessToken stri
 
 	signature := result["signature"].(string)
 	return signature, nil
+}
+
+func GetAuthDataForTypedData(typedData CustomTypedData, key *keystore.Key) (map[string]interface{}, error) {
+	return nil, nil
 }
 
 // In order to sign the typed message with LockKeeper, we need to serialize
