@@ -510,6 +510,63 @@ func CreateSignCommand() *cobra.Command {
 	dropperBatchLkSubcommand.Flags().StringVar(&outfile, "outfile", "", "Output file. If not specified, output will be written to stdout.")
 	dropperBatchLkSubcommand.Flags().BoolVar(&isCSV, "csv", false, "Set this flag if the --infile is a CSV file.")
 
+	dropperSingleLkApprovalSubcommand := &cobra.Command{
+		Use:   "single-lk-approval",
+		Short: "Sign a single claim method call using Lock-keeper with an approval",
+		RunE: func(cmd *cobra.Command, args []string) error {
+
+			messageHash, messageData, hashErr := DropperClaimMessageHash(chainId, dropperAddress, dropId, requestId, claimant, blockDeadline, amount)
+			if hashErr != nil {
+				return hashErr
+			}
+
+			if hashFlag {
+				cmd.Println(hex.EncodeToString(messageHash))
+				return nil
+			}
+
+			accessToken, err := Login()
+			if err != nil {
+				return err
+			}
+
+			key, keyErr := KeyFromFile(keyfile, password)
+			if keyErr != nil {
+				return keyErr
+			}
+
+			signedMessage, err := SignTypedMessageWithApproval(messageData, keyId, accessToken, key)
+			if err != nil {
+				return err
+			}
+
+			result := DropperClaimMessage{
+				DropId:        dropId,
+				RequestID:     requestId,
+				Claimant:      claimant,
+				BlockDeadline: blockDeadline,
+				Amount:        amount,
+				Signature:     signedMessage,
+				Signer:        keyId,
+			}
+			resultJSON, encodeErr := json.Marshal(result)
+			if encodeErr != nil {
+				return encodeErr
+			}
+			os.Stdout.Write(resultJSON)
+			return nil
+		},
+	}
+	dropperSingleLkApprovalSubcommand.Flags().StringVar(&keyId, "key-id", "", "LockKeeper Key ID to use for signing.")
+	dropperSingleLkApprovalSubcommand.Flags().Int64Var(&chainId, "chain-id", 1, "Chain ID of the network you are signing for.")
+	dropperSingleLkApprovalSubcommand.Flags().StringVar(&dropperAddress, "dropper", "0x0000000000000000000000000000000000000000", "Address of Dropper contract")
+	dropperSingleLkApprovalSubcommand.Flags().StringVar(&dropId, "drop-id", "0", "ID of the drop.")
+	dropperSingleLkApprovalSubcommand.Flags().StringVar(&requestId, "request-id", "0", "ID of the request.")
+	dropperSingleLkApprovalSubcommand.Flags().StringVar(&claimant, "claimant", "", "Address of the intended claimant.")
+	dropperSingleLkApprovalSubcommand.Flags().StringVar(&blockDeadline, "block-deadline", "0", "Block number by which the claim must be made.")
+	dropperSingleLkApprovalSubcommand.Flags().StringVar(&amount, "amount", "0", "Amount of tokens to distribute.")
+	dropperSingleLkApprovalSubcommand.Flags().BoolVar(&hashFlag, "hash", false, "Output the message hash instead of the signature.")
+
 	dropperPullSubcommand := &cobra.Command{
 		Use:   "pull",
 		Short: "Pull unprocessed claim requests from the Bugout API",
@@ -538,7 +595,7 @@ func CreateSignCommand() *cobra.Command {
 	dropperPullSubcommand.Flags().IntVarP(&batchSize, "batch-size", "N", 500, "Maximum number of messages to process.")
 	dropperPullSubcommand.Flags().BoolVarP(&header, "header", "H", true, "Set this flag to include header row in output CSV.")
 
-	dropperSubcommand.AddCommand(dropperHashSubcommand, dropperSingleSubcommand, dropperBatchSubcommand, dropperSingleLkSubcommand, dropperBatchLkSubcommand, dropperPullSubcommand)
+	dropperSubcommand.AddCommand(dropperHashSubcommand, dropperSingleSubcommand, dropperBatchSubcommand, dropperSingleLkSubcommand, dropperBatchLkSubcommand, dropperSingleLkApprovalSubcommand, dropperPullSubcommand)
 
 	signCommand.AddCommand(rawSubcommand, dropperSubcommand)
 
