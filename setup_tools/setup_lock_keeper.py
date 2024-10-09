@@ -9,7 +9,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
 from eth_utils.crypto import keccak
-from ecdsa import SigningKey, SECP256k1
+from eth_abi import encode
+from ecdsa import SigningKey, VerifyingKey, SECP256k1, util
 from ecdsa.util import sigencode_der_canonize
 from eth_account.messages import encode_defunct, _hash_eip191_message
 
@@ -25,6 +26,7 @@ AUTH_ENTITY_TYPE_NAME = "approver_auth_entity_type"
 AUTH_ENTITY_TYPE_DESCRIPTION = "Approver Auth Entity Type"
 AUTH_ENTITY_NAME = "approver_auth_entity"
 AUTH_ENTITY_DESCRIPTION = "Entity type to approve waggle claims"
+AUTH_ENTITY_PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----\nMFYwEAYHKoZIzj0CAQYFK4EEAAoDQgAE5BGJ+lGUu4dUWKSjIi9Y2wWW3cQ9wXeu\nLAX0FHpAolJ/FliBlMqE3QBHC3gukPAZUB5lyVTpnyuoINZsBEvQ6Q==\n-----END PUBLIC KEY-----"
 
 # Domain fields
 DOMAIN_NAME = "game7_domain"
@@ -140,11 +142,53 @@ def get_mock_sign_request_typed_data():
     return message_dict
 
 
+# This function is used to hash the typed data using the EIP-712 standard
+def hash_typed_data(typed_data):
+    # 1. Type Hash for the domain
+    domain_type_string = "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    domain_type_hash = keccak(text=domain_type_string)
+
+    # 2. Type Hash for the ClaimPayload
+    claim_payload_type_string = "ClaimPayload(uint256 dropId,uint256 requestID,address claimant,uint256 blockDeadline,uint256 amount)"
+    claim_payload_type_hash = keccak(text=claim_payload_type_string)
+
+    # 3. Encode the EIP-712 domain
+    domain_data = typed_data["domain"]
+    encoded_domain = encode(
+        ["bytes32", "string", "string", "uint256", "address"],
+        [
+            domain_type_hash,
+            domain_data["name"],
+            domain_data["version"],
+            int(domain_data["chainId"], 16),
+            domain_data["verifyingContract"],
+        ],
+    )
+    domain_hash = keccak(encoded_domain)
+
+    # 4. Encode the EIP-712 message (ClaimPayload)
+    message_data = typed_data["message"]
+    encoded_message = encode(
+        ["bytes32", "uint256", "uint256", "address", "uint256", "uint256"],
+        [
+            claim_payload_type_hash,
+            int(message_data["dropId"]),
+            int(message_data["requestID"]),
+            message_data["claimant"],
+            int(message_data["blockDeadline"]),
+            int(message_data["amount"]),
+        ],
+    )
+    message_hash = keccak(encoded_message)
+
+    # 5. Create the final EIP-712 hash
+    prefix = b"\x19\x01"
+    return keccak(prefix + domain_hash + message_hash).hex()
+
+
 def get_authorizing_data(typed_data, private_key):
     # Let's first prepare the typed data to be signed by creating its metadata
-    content_hash = encode_defunct(text=json.dumps(typed_data))
-    content_hash = keccak(content_hash.body).hex()
-    # The content hash is the 712 encoded json object
+    content_hash = hash_typed_data(typed_data)
     metadata = {
         "order_id": "1",
         "content_hash": content_hash,
@@ -153,16 +197,17 @@ def get_authorizing_data(typed_data, private_key):
     }
     base_64_metadata = base64.b64encode(json.dumps(metadata).encode("utf-8"))
 
+    # Before signing, we need to hash the base64 metadata object using keccak
+    # ⚠️: try without hashing, maybe line 208 is already doing that
+    hashed_metadata = keccak(base_64_metadata)
+
     # Then let's sign it using the private key
     private_key_bytes = bytes.fromhex(private_key)
     private_key = SigningKey.from_string(private_key_bytes, curve=SECP256k1)
 
-    # Before signing, we need to hash the base64 metadata object
-    hashed_metadata = keccak(base_64_metadata)
-    # ⚠️: try without hashing, maybe line 167 is already doing that
-
-    # Sign the hashed typed data
-    signature = private_key.sign(hashed_metadata, sigencode=sigencode_der_canonize)
+    signature = private_key.sign(
+        hashed_metadata, sigencode=sigencode_der_canonize, allow_truncate=True
+    )
 
     # Base64 encode the DER-formatted signature
     signature = base64.b64encode(signature).decode("utf-8")
@@ -430,7 +475,8 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
         print("Setting public key for Approver Authorizing Entity...")
 
         # Convert the private key to a PEM encoded public key
-        auth_entity_public_key = private_key_to_pem_public_key(private_key)
+        # auth_entity_public_key = private_key_to_pem_public_key(private_key)
+        auth_entity_public_key = AUTH_ENTITY_PUBLIC_KEY
 
         req_body = {
             "name": AUTH_ENTITY_NAME,
@@ -443,6 +489,7 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
             json=req_body,
             headers={"Authorization": f"Bearer {domain_admin_token}"},
         )
+        print(res.text)
         print("Public key set!")
     else:
         print(f"Authorizing Entity '{AUTH_ENTITY_NAME}' already exists!")
@@ -551,22 +598,26 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
     key_id = res.json().get("key_id")
     print(f"Succesfully generated a key: {key_id}")
 
-    print("Signing a transaction with noop policy...")
+    print("Signing typed data with noop policy...")
+    typed_data = get_mock_sign_request_typed_data()
+    typed_data_json = json.dumps(typed_data)
+    base_64_typed_data = base64.b64encode(typed_data_json.encode("utf-8")).decode(
+        "utf-8"
+    )
     req_body = {
-        "transaction_payload": "f864805e3a9450ca976c38620194110af39ea90e1a66f1464edc80b844a9059cbb0000000000000000000000005b63c7a1ece17e892c99b4a17892000a5888da9400000000000000000000000000000000000000000000000000000000000000048205398080",
+        "typed_data": base_64_typed_data,
         "authorizing_data": [],
         "key_id": key_id,
-        "transaction_type": "EvmStandard",
-        "replacement_nonce": "123456",
+        "message_type": "Standard",
         "policies": [POLICY_NAME],
     }
     res = requests.post(
-        f"{lock_keeper_url}/sign",
+        f"{lock_keeper_url}/sign_message",
         json=req_body,
         headers={"Authorization": f"Bearer {service_provider_token}"},
     )
-    tx_hash = res.json().get("transaction_hash")
-    print(f"Transaction signed! transaction hash: 0x{tx_hash}")
+    signature = res.json().get("signature")
+    print(f"Message signed! signature: {signature}")
 
     print("Signing a typed message with approver policy...")
     typed_data = get_mock_sign_request_typed_data()
