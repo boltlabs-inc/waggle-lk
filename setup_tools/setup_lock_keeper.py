@@ -1,18 +1,18 @@
 import argparse
 import base64
+import getpass
 import json
 import requests
-import getpass
 
-from eth_keyfile import load_keyfile, decode_keyfile_json
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.backends import default_backend
+from ecdsa import SigningKey, SECP256k1
+from ecdsa.util import sigencode_der, sigdecode_der
+from eth_account.messages import encode_typed_data, _hash_eip191_message
+from eth_keyfile import load_keyfile, decode_keyfile_json
 from eth_utils.crypto import keccak
-from eth_abi import encode
-from ecdsa import SigningKey, VerifyingKey, SECP256k1, util
-from ecdsa.util import sigencode_der_canonize
-from eth_account.messages import encode_defunct, _hash_eip191_message
+
 
 # Tenant fields
 TENANT_NAME = "Game7"
@@ -26,7 +26,6 @@ AUTH_ENTITY_TYPE_NAME = "approver_auth_entity_type"
 AUTH_ENTITY_TYPE_DESCRIPTION = "Approver Auth Entity Type"
 AUTH_ENTITY_NAME = "approver_auth_entity"
 AUTH_ENTITY_DESCRIPTION = "Entity type to approve waggle claims"
-AUTH_ENTITY_PUBLIC_KEY = "-----BEGIN PUBLIC KEY-----\nMFYwEAYHKoZIzj0CAQYFK4EEAAoDQgAE5BGJ+lGUu4dUWKSjIi9Y2wWW3cQ9wXeu\nLAX0FHpAolJ/FliBlMqE3QBHC3gukPAZUB5lyVTpnyuoINZsBEvQ6Q==\n-----END PUBLIC KEY-----"
 
 # Domain fields
 DOMAIN_NAME = "game7_domain"
@@ -78,7 +77,9 @@ def decrypt_keystore(key_file):
     with open(key_file, "r") as file:
         keystore = load_keyfile(file)
 
-    password = getpass.getpass("Enter password for the approvers keystore: ")
+    password = getpass.getpass(
+        f"Enter password for the approver keystore ({key_file}): "
+    )
     try:
         private_key = decode_keyfile_json(keystore, password.encode("utf-8"))
     except ValueError:
@@ -142,75 +143,37 @@ def get_mock_sign_request_typed_data():
     return message_dict
 
 
-# This function is used to hash the typed data using the EIP-712 standard
-def hash_typed_data(typed_data):
-    # 1. Type Hash for the domain
-    domain_type_string = "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
-    domain_type_hash = keccak(text=domain_type_string)
-
-    # 2. Type Hash for the ClaimPayload
-    claim_payload_type_string = "ClaimPayload(uint256 dropId,uint256 requestID,address claimant,uint256 blockDeadline,uint256 amount)"
-    claim_payload_type_hash = keccak(text=claim_payload_type_string)
-
-    # 3. Encode the EIP-712 domain
-    domain_data = typed_data["domain"]
-    encoded_domain = encode(
-        ["bytes32", "string", "string", "uint256", "address"],
-        [
-            domain_type_hash,
-            domain_data["name"],
-            domain_data["version"],
-            int(domain_data["chainId"], 16),
-            domain_data["verifyingContract"],
-        ],
-    )
-    domain_hash = keccak(encoded_domain)
-
-    # 4. Encode the EIP-712 message (ClaimPayload)
-    message_data = typed_data["message"]
-    encoded_message = encode(
-        ["bytes32", "uint256", "uint256", "address", "uint256", "uint256"],
-        [
-            claim_payload_type_hash,
-            int(message_data["dropId"]),
-            int(message_data["requestID"]),
-            message_data["claimant"],
-            int(message_data["blockDeadline"]),
-            int(message_data["amount"]),
-        ],
-    )
-    message_hash = keccak(encoded_message)
-
-    # 5. Create the final EIP-712 hash
-    prefix = b"\x19\x01"
-    return keccak(prefix + domain_hash + message_hash).hex()
-
-
-def get_authorizing_data(typed_data, private_key):
+def get_authorizing_data(typed_data, private_key_hex):
     # Let's first prepare the typed data to be signed by creating its metadata
-    content_hash = hash_typed_data(typed_data)
+    content_hash = encode_typed_data(full_message=typed_data)
+    content_hash = _hash_eip191_message(content_hash)
+    content_hash = list(content_hash)
+
     metadata = {
         "order_id": "1",
         "content_hash": content_hash,
-        "approval_status": "1",
+        "approval_status": 1,
         "status_reason": "Approved",
     }
     base_64_metadata = base64.b64encode(json.dumps(metadata).encode("utf-8"))
-
-    # Before signing, we need to hash the base64 metadata object using keccak
-    # ⚠️: try without hashing, maybe line 208 is already doing that
     hashed_metadata = keccak(base_64_metadata)
 
-    # Then let's sign it using the private key
-    private_key_bytes = bytes.fromhex(private_key)
-    private_key = SigningKey.from_string(private_key_bytes, curve=SECP256k1)
+    # With the hex private key, create the signing key to sign the metadata
+    private_key_bytes = bytes.fromhex(private_key_hex)
+    signing_key = SigningKey.from_string(private_key_bytes, curve=SECP256k1)
 
-    signature = private_key.sign(
-        hashed_metadata, sigencode=sigencode_der_canonize, allow_truncate=True
-    )
+    # Sign the hashed metadata
+    signature = signing_key.sign_digest(hashed_metadata, sigencode=sigencode_der)
 
-    # Base64 encode the DER-formatted signature
-    signature = base64.b64encode(signature).decode("utf-8")
+    # Decode the signature to ensure that s is in the lower half of the curve
+    r, s = sigdecode_der(signature, signing_key.curve.order)
+    order = signing_key.curve.order
+    if s > order // 2:
+        s = order - s
+
+    # Rebuild the canonical signature and encode it into base64
+    canonical_signature = sigencode_der(r, s, order)
+    signature = base64.b64encode(canonical_signature).decode()
 
     return {
         "authorizing_entity": AUTH_ENTITY_NAME,
@@ -475,8 +438,7 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
         print("Setting public key for Approver Authorizing Entity...")
 
         # Convert the private key to a PEM encoded public key
-        # auth_entity_public_key = private_key_to_pem_public_key(private_key)
-        auth_entity_public_key = AUTH_ENTITY_PUBLIC_KEY
+        auth_entity_public_key = private_key_to_pem_public_key(private_key)
 
         req_body = {
             "name": AUTH_ENTITY_NAME,
@@ -640,7 +602,8 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
         json=req_body,
         headers={"Authorization": f"Bearer {service_provider_token}"},
     )
-    print(res.text)
+    signature = res.json().get("signature")
+    print(f"Message signed! signature: {signature}")
 
     print_header("Setup Complete! :)")
 
