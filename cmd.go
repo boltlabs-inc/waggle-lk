@@ -567,6 +567,118 @@ func CreateSignCommand() *cobra.Command {
 	dropperSingleLkApprovalSubcommand.Flags().StringVar(&amount, "amount", "0", "Amount of tokens to distribute.")
 	dropperSingleLkApprovalSubcommand.Flags().BoolVar(&hashFlag, "hash", false, "Output the message hash instead of the signature.")
 
+	dropperBatchLkApprovalSubcommand := &cobra.Command{
+		Use:   "batch-lk-approval",
+		Short: "Sign a batch of claim method calls using Lock-keeper with approvals",
+		RunE: func(cmd *cobra.Command, args []string) error {
+
+			var batchRaw []byte
+			var readErr error
+
+			var batch []*DropperClaimMessage
+
+			if !isCSV {
+				if infile != "" {
+					batchRaw, readErr = os.ReadFile(infile)
+				} else {
+					batchRaw, readErr = io.ReadAll(os.Stdin)
+				}
+				if readErr != nil {
+					return readErr
+				}
+
+				parseErr := json.Unmarshal(batchRaw, &batch)
+				if parseErr != nil {
+					return parseErr
+				}
+			} else {
+				var csvReader *csv.Reader
+				if infile == "" {
+					csvReader = csv.NewReader(os.Stdin)
+				} else {
+					r, csvOpenErr := os.Open(infile)
+					if csvOpenErr != nil {
+						return csvOpenErr
+					}
+					defer r.Close()
+
+					csvReader = csv.NewReader(r)
+				}
+
+				csvData, csvReadErr := csvReader.ReadAll()
+				if csvReadErr != nil {
+					return csvReadErr
+				}
+
+				csvHeaders := csvData[0]
+				csvData = csvData[1:]
+				batch = make([]*DropperClaimMessage, len(csvData))
+
+				for i, row := range csvData {
+					jsonData := make(map[string]string)
+
+					for j, value := range row {
+						jsonData[csvHeaders[j]] = value
+					}
+
+					jsonString, rowMarshalErr := json.Marshal(jsonData)
+					if rowMarshalErr != nil {
+						return rowMarshalErr
+					}
+
+					rowParseErr := json.Unmarshal(jsonString, &batch[i])
+					if rowParseErr != nil {
+						return rowParseErr
+					}
+				}
+			}
+
+			accessToken, err := Login()
+			if err != nil {
+				return err
+			}
+
+			key, keyErr := KeyFromFile(keyfile, password)
+			if keyErr != nil {
+				return keyErr
+			}
+
+			for _, message := range batch {
+				_, messageData, hashErr := DropperClaimMessageHash(chainId, dropperAddress, message.DropId, message.RequestID, message.Claimant, message.BlockDeadline, message.Amount)
+				if hashErr != nil {
+					return hashErr
+				}
+
+				signedMessage, signatureErr := SignTypedMessageWithApproval(messageData, keyId, accessToken, key)
+				if signatureErr != nil {
+					return signatureErr
+				}
+
+				message.Signature = signedMessage
+				message.Signer = keyId
+			}
+
+			resultJSON, encodeErr := json.Marshal(batch)
+			if encodeErr != nil {
+				return encodeErr
+			}
+
+			if outfile != "" {
+				os.WriteFile(outfile, resultJSON, 0644)
+			} else {
+				os.Stdout.Write(resultJSON)
+			}
+
+			return nil
+		},
+	}
+	dropperBatchLkApprovalSubcommand.Flags().StringVar(&keyId, "key-id", "", "LockKeeper Key ID to use for signing.")
+	dropperBatchLkApprovalSubcommand.Flags().Int64Var(&chainId, "chain-id", 1, "Chain ID of the network you are signing for.")
+	dropperBatchLkApprovalSubcommand.Flags().StringVar(&dropperAddress, "dropper", "0x0000000000000000000000000000000000000000", "Address of Dropper contract")
+	dropperBatchLkApprovalSubcommand.Flags().StringVar(&infile, "infile", "", "ID of the drop.")
+	dropperBatchLkApprovalSubcommand.Flags().StringVar(&outfile, "outfile", "", "Output file. If not specified, output will be written to stdout.")
+	dropperBatchLkApprovalSubcommand.Flags().BoolVar(&isCSV, "csv", false, "Set this flag if the --infile is a CSV file.")
+
 	dropperPullSubcommand := &cobra.Command{
 		Use:   "pull",
 		Short: "Pull unprocessed claim requests from the Bugout API",
@@ -595,7 +707,7 @@ func CreateSignCommand() *cobra.Command {
 	dropperPullSubcommand.Flags().IntVarP(&batchSize, "batch-size", "N", 500, "Maximum number of messages to process.")
 	dropperPullSubcommand.Flags().BoolVarP(&header, "header", "H", true, "Set this flag to include header row in output CSV.")
 
-	dropperSubcommand.AddCommand(dropperHashSubcommand, dropperSingleSubcommand, dropperBatchSubcommand, dropperSingleLkSubcommand, dropperBatchLkSubcommand, dropperSingleLkApprovalSubcommand, dropperPullSubcommand)
+	dropperSubcommand.AddCommand(dropperHashSubcommand, dropperSingleSubcommand, dropperBatchSubcommand, dropperSingleLkSubcommand, dropperBatchLkSubcommand, dropperSingleLkApprovalSubcommand, dropperBatchLkApprovalSubcommand, dropperPullSubcommand)
 
 	signCommand.AddCommand(rawSubcommand, dropperSubcommand)
 

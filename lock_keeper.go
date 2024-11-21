@@ -14,10 +14,9 @@ import (
 	"net/url"
 	"os"
 
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/keystore"
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/math"
+	"github.com/ethereum/go-ethereum/crypto/secp256k1"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/sha3"
@@ -132,7 +131,7 @@ func SignTypedMessageWithApproval(message apitypes.TypedData, keyId string, acce
 	typedData := base64.StdEncoding.EncodeToString(jsonBytes)
 
 	// Get the authorizing data for the typed message
-	authData, err := GetAuthDataForTypedData(message, key)
+	authData, err := GetAuthorizingData(message, key, lockKeeperConfig)
 	if err != nil {
 		return "", err
 	}
@@ -168,7 +167,6 @@ func SignTypedMessageWithApproval(message apitypes.TypedData, keyId string, acce
 	if readErr != nil {
 		return "", readErr
 	}
-	os.Stdout.Write(body)
 
 	var result map[string]interface{}
 	if deserializeErr := json.Unmarshal(body, &result); deserializeErr != nil {
@@ -179,74 +177,89 @@ func SignTypedMessageWithApproval(message apitypes.TypedData, keyId string, acce
 	return signature, nil
 }
 
+func GetAuthorizingData(typedData apitypes.TypedData, key *keystore.Key, lockKeeperConfig *LockKeeperConfig) (map[string]interface{}, error) {
+	// the metadata object that will be signed needs the EIP-712 message hash
+	// of the typed data that will be signed
+	contentHashBytes, _, err := apitypes.TypedDataAndHash(typedData)
+	if err != nil {
+		return nil, err
+	}
+	// The contentHash bytes object needs to be represented as an array of integers
+	// so it can be JSON serialized appropriately
+	contentHashInt := ByteSliceToIntArray(contentHashBytes)
+
+	// create the metadata object, serialize it to JSON, and base64 encode it
+	metadata := map[string]interface{}{
+		"order_id":        "1",
+		"content_hash":    contentHashInt,
+		"approval_status": 1,
+		"status_reason":   "Approved",
+	}
+	jsonData, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal metadata to JSON: %v", err)
+	}
+	base64Metadata := base64.StdEncoding.EncodeToString(jsonData)
+
+	// In order to pre-approve the signing operation, we need to sign the metadata
+	// using the approver's key and then send the signature to LockKeeper
+	signature, err := SignMetadata([]byte(base64Metadata), key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign metadata: %v", err)
+	}
+
+	// create the authorizing data object and return it to be included in the request
+	authData := map[string]interface{}{
+		"authorizing_entity": lockKeeperConfig.AuthEntity,
+		"level":              "Domain",
+		"metadata":           base64Metadata,
+		"metadata_signature": signature,
+	}
+	return authData, nil
+}
+
 type ECDSASignature struct {
 	R, S *big.Int
 }
 
-// SignRawMessage is assumed to return raw r || s concatenation
-func SignRawMessageWithDerSignature(hash []byte, key *keystore.Key, _ bool) ([]byte, error) {
-	// ECDSA signing logic here
-	privKey := key.PrivateKey
-	r, s, err := ecdsa.Sign(rand.Reader, privKey, hash)
+func SignMetadata(base64Metadata []byte, key *keystore.Key) (string, error) {
+	// Keccak-256 hash the base64 metadata
+	hashedMetadata := sha3.NewLegacyKeccak256()
+	hashedMetadata.Write(base64Metadata)
+	metadataHash := hashedMetadata.Sum(nil)
+
+	// Gets the private key and use that to sign the pre-approval
+	privateKey := key.PrivateKey
+	r, s, err := ecdsa.Sign(rand.Reader, privateKey, metadataHash)
 	if err != nil {
-		return nil, err
+		fmt.Println("Error signing message:", err)
+		return "", err
 	}
 
-	// Create an ECDSASignature object and DER-encode it using ASN.1
+	// Canonicalize the signature by ensuring s is in the lower half of the curve order
+	curveOrder := secp256k1.S256().Params().N
+	if s.Cmp(new(big.Int).Rsh(curveOrder, 1)) > 0 {
+		s.Sub(curveOrder, s)
+	}
+
+	// Before returning the signature, we need to encode it to DER format, and then base64 encode it
 	signature := ECDSASignature{R: r, S: s}
-	derEncodedSignature, err := asn1.Marshal(signature)
+	derEncodedSig, err := asn1.Marshal(signature)
 	if err != nil {
-		return nil, err
+		fmt.Println("Error encoding signature to DER:", err)
+		return "", err
 	}
+	base64Sig := base64.StdEncoding.EncodeToString(derEncodedSig)
 
-	return derEncodedSignature, nil
+	return base64Sig, nil
 }
 
-func GetAuthDataForTypedData(typedData apitypes.TypedData, key *keystore.Key) (map[string]interface{}, error) {
-
-	lockKeeperConfig, err := LoadLockKeeperConfig()
-	if err != nil {
-		return nil, err
+func ByteSliceToIntArray(byteSlice []byte) []int {
+	intArray := make([]int, len(byteSlice))
+	for i, b := range byteSlice {
+		intArray[i] = int(b)
 	}
-
-	// first encode the typed data into a 712 hash
-	hash, err := EncodeEIP712TypedData(typedData)
-	if err != nil {
-		return nil, err
-	}
-
-	// create the metadata object
-	metadata := map[string]interface{}{
-		"order_id":        "1",
-		"content_hash":    common.Bytes2Hex(hash),
-		"approval_status": "1",
-		"status_reason":   "Approved",
-	}
-
-	// encode the metadata into base64
-	metadataBytes, err := json.Marshal(metadata)
-	if err != nil {
-		return nil, err
-	}
-	metadataBase64 := base64.StdEncoding.EncodeToString(metadataBytes)
-	metadataHash := keccak256(metadataBytes)
-
-	// sign the metadata with the keystore key
-	signature, err := SignRawMessageWithDerSignature(metadataHash, key, false)
-	if err != nil {
-		return nil, err
-	}
-
-	// create the authorizing data object
-	authData := map[string]interface{}{
-		"authorizing_entity": lockKeeperConfig.AuthEntity,
-		"level":              "Tenant",
-		"metadata":           metadataBase64,
-		"metadata_signature": base64.StdEncoding.EncodeToString(signature),
-	}
-
-	// return the authorizing data
-	return authData, nil
+	return intArray
 }
 
 // In order to sign the typed message with LockKeeper, we need to serialize
@@ -284,149 +297,6 @@ func SerializeTypedDataWithoutSalt(original apitypes.TypedData) ([]byte, error) 
 	return json.Marshal(customTypedData)
 }
 
-// Keccak256 hashing function
-func keccak256(data []byte) []byte {
-	hash := sha3.NewLegacyKeccak256()
-	hash.Write(data)
-	return hash.Sum(nil)
-}
-
-// Encode and hash the domain
-func hashDomain(domain CustomDomain) ([]byte, error) {
-	// Create ABI types dynamically
-	stringType, err := abi.NewType("string", "", nil)
-	if err != nil {
-		return nil, err
-	}
-	uint256Type, err := abi.NewType("uint256", "", nil)
-	if err != nil {
-		return nil, err
-	}
-	addressType, err := abi.NewType("address", "", nil)
-	if err != nil {
-		return nil, err
-	}
-
-	// ABI Arguments for domain struct
-	arguments := abi.Arguments{
-		{Type: stringType},  // Name
-		{Type: stringType},  // Version
-		{Type: uint256Type}, // ChainId
-		{Type: addressType}, // VerifyingContract
-	}
-
-	// Pack the domain fields
-	encoded, err := arguments.Pack(
-		domain.Name,
-		domain.Version,
-		(*big.Int)(domain.ChainId),
-		common.HexToAddress(domain.VerifyingContract),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	// Hash the packed result
-	return keccak256(encoded), nil
-}
-
-// Hash the ClaimPayload message fields
-func hashMessage(claimPayload map[string]interface{}) ([]byte, error) {
-	// Define the ABI argument types for the ClaimPayload
-	arguments := abi.Arguments{}
-
-	// Create types for each expected field and append them to the arguments slice
-	for _, field := range []struct {
-		Name string
-		Type string
-	}{
-		{"dropId", "uint256"},
-		{"requestID", "uint256"},
-		{"claimant", "address"},
-		{"blockDeadline", "uint256"},
-		{"amount", "uint256"},
-	} {
-		// Create the type and check for errors
-		typ, err := abi.NewType(field.Type, "", nil)
-		if err != nil {
-			return nil, err // Return if there was an error creating the type
-		}
-
-		// Append the argument with the field name and type
-		arguments = append(arguments, abi.Argument{Name: field.Name, Type: typ})
-	}
-
-	// Prepare the values for packing
-	values := make([]interface{}, 0, len(arguments))
-
-	// Extract and convert the fields from the claimPayload
-	for _, arg := range arguments {
-		switch arg.Type.String() {
-		case "uint256":
-			// For uint256, we expect a string that can be converted to big.Int
-			if value, ok := claimPayload[arg.Name].(string); ok {
-				bigIntValue := new(big.Int)
-				if _, success := bigIntValue.SetString(value, 10); success {
-					values = append(values, bigIntValue)
-				} else {
-					return nil, fmt.Errorf("invalid uint256 value for %s: %s", arg.Name, value)
-				}
-			} else {
-				return nil, fmt.Errorf("expected uint256 for %s but got %T", arg.Name, claimPayload[arg.Name])
-			}
-
-		case "address":
-			// For address, expect a string representation
-			if value, ok := claimPayload[arg.Name].(string); ok {
-				address := common.HexToAddress(value)
-				values = append(values, address)
-			} else {
-				return nil, fmt.Errorf("expected address for %s but got %T", arg.Name, claimPayload[arg.Name])
-			}
-		}
-	}
-
-	// Pack the message fields into binary format
-	encoded, err := arguments.Pack(values...)
-	if err != nil {
-		return nil, err
-	}
-
-	// Hash the packed result
-	return keccak256(encoded), nil
-}
-
-// Perform full EIP-712 encoding
-func EncodeEIP712TypedData(original apitypes.TypedData) ([]byte, error) {
-	// First, serialize the domain without the 'salt'
-	customDomain := CustomDomain{
-		Name:              original.Domain.Name,
-		Version:           original.Domain.Version,
-		ChainId:           original.Domain.ChainId,
-		VerifyingContract: original.Domain.VerifyingContract,
-	}
-
-	// Hash the domain
-	domainHash, err := hashDomain(customDomain)
-	if err != nil {
-		return nil, err
-	}
-
-	// Hash the message
-	messageHash, err := hashMessage(original.Message)
-	if err != nil {
-		return nil, err
-	}
-
-	// Prefix for EIP-712
-	prefix := []byte("\x19\x01")
-
-	// Combine everything into the final hash
-	finalHash := keccak256(append(append(prefix, domainHash...), messageHash...))
-
-	return finalHash, nil
-}
-
 // To facilitate the LockKeeper integration, we need to load the configuration
 // from the environment variables
 type LockKeeperConfig struct {
@@ -442,38 +312,35 @@ type LockKeeperConfig struct {
 func LoadLockKeeperConfig() (*LockKeeperConfig, error) {
 	godotenv.Load()
 
-	config := &LockKeeperConfig{}
-	var err error
+	env_vars := []string{
+		"LOCK_KEEPER_URL",
+		"LOCK_KEEPER_TENANT",
+		"LOCK_KEEPER_USERNAME",
+		"LOCK_KEEPER_PASSWORD",
+		"LOCK_KEEPER_POLICY",
+		"LOCK_KEEPER_APPROVER_POLICY",
+		"LOCK_KEEPER_AUTH_ENTITY",
+	}
+	missing_vars := []string{}
 
-	if config.URL, err = getEnv("LOCK_KEEPER_URL"); err != nil {
-		return nil, err
+	for _, env_var := range env_vars {
+		if _, exists := os.LookupEnv(env_var); !exists {
+			missing_vars = append(missing_vars, env_var)
+		}
 	}
-	if config.Tenant, err = getEnv("LOCK_KEEPER_TENANT"); err != nil {
-		return nil, err
+
+	if len(missing_vars) > 0 {
+		return nil, fmt.Errorf("missing environment variables: %v", missing_vars)
 	}
-	if config.Username, err = getEnv("LOCK_KEEPER_USERNAME"); err != nil {
-		return nil, err
-	}
-	if config.Password, err = getEnv("LOCK_KEEPER_PASSWORD"); err != nil {
-		return nil, err
-	}
-	if config.Policy, err = getEnv("LOCK_KEEPER_POLICY"); err != nil {
-		return nil, err
-	}
-	if config.ApproverPolicy, err = getEnv("LOCK_KEEPER_APPROVER_POLICY"); err != nil {
-		return nil, err
-	}
-	if config.AuthEntity, err = getEnv("LOCK_KEEPER_AUTH_ENTITY"); err != nil {
-		return nil, err
-	}
+
+	config := &LockKeeperConfig{}
+	config.URL, _ = os.LookupEnv("LOCK_KEEPER_URL")
+	config.Tenant, _ = os.LookupEnv("LOCK_KEEPER_TENANT")
+	config.Username, _ = os.LookupEnv("LOCK_KEEPER_USERNAME")
+	config.Password, _ = os.LookupEnv("LOCK_KEEPER_PASSWORD")
+	config.Policy, _ = os.LookupEnv("LOCK_KEEPER_POLICY")
+	config.ApproverPolicy, _ = os.LookupEnv("LOCK_KEEPER_APPROVER_POLICY")
+	config.AuthEntity, _ = os.LookupEnv("LOCK_KEEPER_AUTH_ENTITY")
 
 	return config, nil
-}
-
-func getEnv(key string) (string, error) {
-	value, exists := os.LookupEnv(key)
-	if !exists {
-		return "", fmt.Errorf("missing enviroment variable: %s", key)
-	}
-	return value, nil
 }
