@@ -14,8 +14,8 @@ import (
 	"net/url"
 	"os"
 
-	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/common/math"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/crypto/secp256k1"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
 	"github.com/joho/godotenv"
@@ -114,7 +114,7 @@ func SignTypedMessage(message apitypes.TypedData, keyId string, accessToken stri
 	return signature, nil
 }
 
-func SignTypedMessageWithApproval(message apitypes.TypedData, keyId string, accessToken string, key *keystore.Key) (string, error) {
+func SignTypedMessageWithApproval(message apitypes.TypedData, keyId string, accessToken string) (string, error) {
 	if keyId == "" {
 		return "", fmt.Errorf("lock keeper key-id is required")
 	}
@@ -131,14 +131,14 @@ func SignTypedMessageWithApproval(message apitypes.TypedData, keyId string, acce
 	typedData := base64.StdEncoding.EncodeToString(jsonBytes)
 
 	// Get the authorizing data for the typed message
-	authData, err := GetAuthorizingData(message, key, lockKeeperConfig)
+	authData, err := GetAuthorizingData(message, lockKeeperConfig)
 	if err != nil {
 		return "", err
 	}
 
 	reqBody := map[string]interface{}{
 		"typed_data":       typedData,
-		"authorizing_data": []interface{}{authData},
+		"authorizing_data": authData,
 		"key_id":           keyId,
 		"message_type":     "Standard",
 		"policies":         []string{lockKeeperConfig.ApproverPolicy},
@@ -177,7 +177,7 @@ func SignTypedMessageWithApproval(message apitypes.TypedData, keyId string, acce
 	return signature, nil
 }
 
-func GetAuthorizingData(typedData apitypes.TypedData, key *keystore.Key, lockKeeperConfig *LockKeeperConfig) (map[string]interface{}, error) {
+func GetAuthorizingData(typedData apitypes.TypedData, lockKeeperConfig *LockKeeperConfig) ([]map[string]interface{}, error) {
 	// the metadata object that will be signed needs the EIP-712 message hash
 	// of the typed data that will be signed
 	contentHashBytes, _, err := apitypes.TypedDataAndHash(typedData)
@@ -201,19 +201,30 @@ func GetAuthorizingData(typedData apitypes.TypedData, key *keystore.Key, lockKee
 	}
 	base64Metadata := base64.StdEncoding.EncodeToString(jsonData)
 
-	// In order to pre-approve the signing operation, we need to sign the metadata
-	// using the approver's key and then send the signature to LockKeeper
-	signature, err := SignMetadata([]byte(base64Metadata), key)
+	approver1Signature, err := SignMetadataWithApprover([]byte(base64Metadata), lockKeeperConfig.Approver1Key)
 	if err != nil {
-		return nil, fmt.Errorf("failed to sign metadata: %v", err)
+		return nil, err
+	}
+	approver2Signature, err := SignMetadataWithApprover([]byte(base64Metadata), lockKeeperConfig.Approver2Key)
+	if err != nil {
+		return nil, err
 	}
 
-	// create the authorizing data object and return it to be included in the request
-	authData := map[string]interface{}{
-		"authorizing_entity": lockKeeperConfig.AuthEntity,
-		"level":              "Domain",
-		"metadata":           base64Metadata,
-		"metadata_signature": signature,
+	// In order to pre-approve the signing operation, we need to sign the metadata
+	// using each approver's key and then send the signature to LockKeeper
+	authData := []map[string]interface{}{
+		{
+			"authorizing_entity": lockKeeperConfig.Approver1Name,
+			"level":              "Domain",
+			"metadata":           base64Metadata,
+			"metadata_signature": approver1Signature,
+		},
+		{
+			"authorizing_entity": lockKeeperConfig.Approver2Name,
+			"level":              "Domain",
+			"metadata":           base64Metadata,
+			"metadata_signature": approver2Signature,
+		},
 	}
 	return authData, nil
 }
@@ -222,15 +233,18 @@ type ECDSASignature struct {
 	R, S *big.Int
 }
 
-func SignMetadata(base64Metadata []byte, key *keystore.Key) (string, error) {
+func SignMetadataWithApprover(base64Metadata []byte, approverHexKey string) (string, error) {
 	// Keccak-256 hash the base64 metadata
 	hashedMetadata := sha3.NewLegacyKeccak256()
 	hashedMetadata.Write(base64Metadata)
 	metadataHash := hashedMetadata.Sum(nil)
 
 	// Gets the private key and use that to sign the pre-approval
-	privateKey := key.PrivateKey
-	r, s, err := ecdsa.Sign(rand.Reader, privateKey, metadataHash)
+	approverPrivateKey, err := crypto.HexToECDSA(approverHexKey)
+	if err != nil {
+		return "", err
+	}
+	r, s, err := ecdsa.Sign(rand.Reader, approverPrivateKey, metadataHash)
 	if err != nil {
 		fmt.Println("Error signing message:", err)
 		return "", err
@@ -306,7 +320,10 @@ type LockKeeperConfig struct {
 	Password       string
 	Policy         string
 	ApproverPolicy string
-	AuthEntity     string
+	Approver1Name  string
+	Approver1Key   string
+	Approver2Name  string
+	Approver2Key   string
 }
 
 func LoadLockKeeperConfig() (*LockKeeperConfig, error) {
@@ -319,7 +336,10 @@ func LoadLockKeeperConfig() (*LockKeeperConfig, error) {
 		"LOCK_KEEPER_PASSWORD",
 		"LOCK_KEEPER_POLICY",
 		"LOCK_KEEPER_APPROVER_POLICY",
-		"LOCK_KEEPER_AUTH_ENTITY",
+		"LOCK_KEEPER_APPROVER_1_NAME",
+		"LOCK_KEEPER_APPROVER_1_KEY",
+		"LOCK_KEEPER_APPROVER_2_NAME",
+		"LOCK_KEEPER_APPROVER_2_KEY",
 	}
 	missing_vars := []string{}
 
@@ -340,7 +360,10 @@ func LoadLockKeeperConfig() (*LockKeeperConfig, error) {
 	config.Password, _ = os.LookupEnv("LOCK_KEEPER_PASSWORD")
 	config.Policy, _ = os.LookupEnv("LOCK_KEEPER_POLICY")
 	config.ApproverPolicy, _ = os.LookupEnv("LOCK_KEEPER_APPROVER_POLICY")
-	config.AuthEntity, _ = os.LookupEnv("LOCK_KEEPER_AUTH_ENTITY")
+	config.Approver1Name, _ = os.LookupEnv("LOCK_KEEPER_APPROVER_1_NAME")
+	config.Approver1Key, _ = os.LookupEnv("LOCK_KEEPER_APPROVER_1_KEY")
+	config.Approver2Name, _ = os.LookupEnv("LOCK_KEEPER_APPROVER_2_NAME")
+	config.Approver2Key, _ = os.LookupEnv("LOCK_KEEPER_APPROVER_2_KEY")
 
 	return config, nil
 }

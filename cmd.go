@@ -530,12 +530,7 @@ func CreateSignCommand() *cobra.Command {
 				return err
 			}
 
-			key, keyErr := KeyFromFile(keyfile, password)
-			if keyErr != nil {
-				return keyErr
-			}
-
-			signedMessage, err := SignTypedMessageWithApproval(messageData, keyId, accessToken, key)
+			signedMessage, err := SignTypedMessageWithApproval(messageData, keyId, accessToken)
 			if err != nil {
 				return err
 			}
@@ -638,18 +633,13 @@ func CreateSignCommand() *cobra.Command {
 				return err
 			}
 
-			key, keyErr := KeyFromFile(keyfile, password)
-			if keyErr != nil {
-				return keyErr
-			}
-
 			for _, message := range batch {
 				_, messageData, hashErr := DropperClaimMessageHash(chainId, dropperAddress, message.DropId, message.RequestID, message.Claimant, message.BlockDeadline, message.Amount)
 				if hashErr != nil {
 					return hashErr
 				}
 
-				signedMessage, signatureErr := SignTypedMessageWithApproval(messageData, keyId, accessToken, key)
+				signedMessage, signatureErr := SignTypedMessageWithApproval(messageData, keyId, accessToken)
 				if signatureErr != nil {
 					return signatureErr
 				}
