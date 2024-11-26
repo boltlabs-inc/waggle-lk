@@ -21,12 +21,19 @@ And then execute the following steps to ensure that the Lock Keeper instance is 
 
 ## Usage
 
-Before using the tool, you need to import a private key to hold the approver's key in a new keystore file, you can do so by running:
+Before using the tool, you need export two private keys that will be used as the approvers for the approver policy. Keep in mind that this should also be the keys to use when signing the claims in the game.
+
+These env vars can also be set in a `.env` file in the `setup_tools` directory. To easily set these env vars, you can use the following command:
 
 ```bash
-waggle accounts import -k approver_key.json
-````
-and then following the steps to import the key.
+cp .env.example .env
+```
+
+Then you can edit the `.env` file and set the values for the following env vars:
+
+- `APPROVER_1_PRIVATE_KEY`
+- `APPROVER_2_PRIVATE_KEY`
+
 
 After that, you then need to setup your virtual environment and install the requirements:
 
@@ -34,11 +41,11 @@ After that, you then need to setup your virtual environment and install the requ
 cd setup_tools
 python3 -m venv venv
 source venv/bin/activate
-pip install requests
+pip install -r requirements.txt
 ```
 
 Then you can run the tool with the following command:
 
 ```bash
-python setup_lock_keeper.py LOCK_KEEPER_URL SUPER_ADMIN_PASSWORD APPROVER_KEYSTORE_FILE
+python setup_lock_keeper.py LOCK_KEEPER_URL SUPER_ADMIN_PASSWORD
 ```

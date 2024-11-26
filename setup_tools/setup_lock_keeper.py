@@ -2,6 +2,8 @@ import argparse
 import base64
 import getpass
 import json
+import os
+from dotenv import load_dotenv
 import requests
 
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -24,8 +26,10 @@ DEFAULT_ZONE_DESCRIPTION = "Game7 zone"
 # Authorizing Entity fields
 AUTH_ENTITY_TYPE_NAME = "approver_auth_entity_type"
 AUTH_ENTITY_TYPE_DESCRIPTION = "Approver Auth Entity Type"
-AUTH_ENTITY_NAME = "approver_auth_entity"
-AUTH_ENTITY_DESCRIPTION = "Entity type to approve waggle claims"
+APPROVER_1_NAME = "approver_1_auth_entity"
+APPROVER_1_DESCRIPTION = "Approver 1 to approve waggle claims"
+APPROVER_2_NAME = "approver_2_auth_entity"
+APPROVER_2_DESCRIPTION = "Approver 2 to approve waggle claims"
 
 # Domain fields
 DOMAIN_NAME = "game7_domain"
@@ -89,6 +93,24 @@ def decrypt_keystore(key_file):
     return private_key.hex()
 
 
+def get_approvers_private_keys_from_env():
+    load_dotenv()
+    env_vars = [
+        "APPROVER_1_PRIVATE_KEY",
+        "APPROVER_2_PRIVATE_KEY",
+    ]
+    missing_vars = []
+    for var in env_vars:
+        if var not in os.environ:
+            missing_vars.append(var)
+
+    if missing_vars:
+        print(f"Missing environment variables: {missing_vars}")
+        exit(1)
+
+    return os.getenv("APPROVER_1_PRIVATE_KEY"), os.getenv("APPROVER_2_PRIVATE_KEY")
+
+
 def private_key_to_pem_public_key(private_key):
     private_key_bytes = bytes.fromhex(private_key)
 
@@ -143,7 +165,7 @@ def get_mock_sign_request_typed_data():
     return message_dict
 
 
-def get_authorizing_data(typed_data, private_key_hex):
+def get_authorizing_data(typed_data, approver_1_private_key, approver_2_private_key):
     # Let's first prepare the typed data to be signed by creating its metadata
     content_hash = encode_typed_data(full_message=typed_data)
     content_hash = _hash_eip191_message(content_hash)
@@ -158,8 +180,30 @@ def get_authorizing_data(typed_data, private_key_hex):
     base_64_metadata = base64.b64encode(json.dumps(metadata).encode("utf-8"))
     hashed_metadata = keccak(base_64_metadata)
 
-    # With the hex private key, create the signing key to sign the metadata
-    private_key_bytes = bytes.fromhex(private_key_hex)
+    # Then we prepare the authorizing data object with signatures from both approvers
+    return [
+        {
+            "authorizing_entity": APPROVER_1_NAME,
+            "level": "Domain",
+            "metadata": base_64_metadata.decode("utf-8"),
+            "metadata_signature": sign_metadata_with_approver(
+                approver_1_private_key, hashed_metadata
+            ),
+        },
+        {
+            "authorizing_entity": APPROVER_2_NAME,
+            "level": "Domain",
+            "metadata": base_64_metadata.decode("utf-8"),
+            "metadata_signature": sign_metadata_with_approver(
+                approver_2_private_key, hashed_metadata
+            ),
+        },
+    ]
+
+
+def sign_metadata_with_approver(approver_private_key, hashed_metadata):
+    # Get the signing key from the approver's private key hex
+    private_key_bytes = bytes.fromhex(approver_private_key)
     signing_key = SigningKey.from_string(private_key_bytes, curve=SECP256k1)
 
     # Sign the hashed metadata
@@ -175,19 +219,17 @@ def get_authorizing_data(typed_data, private_key_hex):
     canonical_signature = sigencode_der(r, s, order)
     signature = base64.b64encode(canonical_signature).decode()
 
-    return {
-        "authorizing_entity": AUTH_ENTITY_NAME,
-        "level": "Domain",
-        "metadata": base_64_metadata.decode("utf-8"),
-        "metadata_signature": signature,
-    }
+    # Return the base64 encoded signature
+    return signature
 
 
-def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
+def setup_lock_keeper(lock_keeper_url, super_admin_password):
+
+    approver_1_private_key, approver_2_private_key = (
+        get_approvers_private_keys_from_env()
+    )
+
     print(f"Setting up Lock Keeper at {lock_keeper_url}")
-
-    print("Decrypting approver keystore...")
-    private_key = decrypt_keystore(key_file)
 
     print_header("Lock Keeper Setup")
 
@@ -196,7 +238,7 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
     super_admin_token = login(
         f"{lock_keeper_url}/login", "super_admin", super_admin_password
     )
-    print("Sucess!")
+    print("Success!")
 
     print_header("Tenant Setup")
 
@@ -284,7 +326,7 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
             f"{DOMAIN_NAME}_admin",
             "password",
         )
-        print("Sucess!")
+        print("Success!")
 
         print("Updating Domain Admin roles...")
         req_body = {
@@ -307,7 +349,7 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
             f"{DOMAIN_NAME}_admin",
             "password",
         )
-        print("Sucess!")
+        print("Success!")
 
     # We first check if the policy admin exists, if not, we create it
     res = requests.get(
@@ -339,7 +381,7 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
         DOMAIN_POLICY_ADMIN_NAME,
         "password",
     )
-    print("Sucess!")
+    print("Success!")
 
     print_header("Policy Approver Setup")
 
@@ -407,18 +449,19 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
     else:
         print(f"Authorizing Entity Type '{AUTH_ENTITY_TYPE_NAME}' already exists!")
 
-    print_header("Approver Authorizing Entity Setup")
+    print_header("Approvers Authorizing Entity Setup")
 
-    # We check if the authorizing entity exists, if not, we create it
+    print_header("Approver 1 Setup")
+    # We check if the approver 1 exists, if not, we create it
     res = requests.get(
-        f"{lock_keeper_url}/authorizing_entity/{AUTH_ENTITY_NAME}",
+        f"{lock_keeper_url}/authorizing_entity/{APPROVER_1_NAME}",
         headers={"Authorization": f"Bearer {domain_admin_token}"},
     )
     if res.status_code != 200:
-        print("Creating Approver Authorizing Entity...")
+        print("Creating Approver 1...")
         req_body = {
-            "name": AUTH_ENTITY_NAME,
-            "description": AUTH_ENTITY_DESCRIPTION,
+            "name": APPROVER_1_NAME,
+            "description": APPROVER_1_DESCRIPTION,
             "entity_type": AUTH_ENTITY_TYPE_NAME,
         }
         res = requests.post(
@@ -426,24 +469,23 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
             json=req_body,
             headers={"Authorization": f"Bearer {domain_admin_token}"},
         )
-        print("Approver Authorizing Entity created!")
+        print("Approver 1 created!")
 
-        print("Setting one time passcode for Approver Authorizing Entity...")
+        print("Setting one time passcode for Approver 1...")
         passcode_res = requests.put(
-            f"{lock_keeper_url}/authorizing_entity/{AUTH_ENTITY_NAME}/passcode",
+            f"{lock_keeper_url}/authorizing_entity/{APPROVER_1_NAME}/passcode",
             headers={"Authorization": f"Bearer {domain_admin_token}"},
         )
         print("One time passcode set!")
 
-        print("Setting public key for Approver Authorizing Entity...")
+        print("Setting public key for Approver 1...")
 
         # Convert the private key to a PEM encoded public key
-        auth_entity_public_key = private_key_to_pem_public_key(private_key)
-
+        approver_1_public_key = private_key_to_pem_public_key(approver_1_private_key)
         req_body = {
-            "name": AUTH_ENTITY_NAME,
+            "name": APPROVER_1_NAME,
             "passcode": passcode_res.json()["passcode"],
-            "public_key": auth_entity_public_key,
+            "public_key": approver_1_public_key,
         }
         upload_path_parameter = passcode_res.json().get("upload_path_parameter")
         res = requests.put(
@@ -454,7 +496,55 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
         print(res.text)
         print("Public key set!")
     else:
-        print(f"Authorizing Entity '{AUTH_ENTITY_NAME}' already exists!")
+        print(f"Authorizing Entity '{APPROVER_1_NAME}' already exists!")
+
+    print_header("Approver 2 Setup")
+    # We check if the approver 2 exists, if not, we create it
+    res = requests.get(
+        f"{lock_keeper_url}/authorizing_entity/{APPROVER_2_NAME}",
+        headers={"Authorization": f"Bearer {domain_admin_token}"},
+    )
+    if res.status_code != 200:
+        print("Creating Approver 2...")
+        req_body = {
+            "name": APPROVER_2_NAME,
+            "description": APPROVER_2_DESCRIPTION,
+            "entity_type": AUTH_ENTITY_TYPE_NAME,
+        }
+        res = requests.post(
+            f"{lock_keeper_url}/authorizing_entity",
+            json=req_body,
+            headers={"Authorization": f"Bearer {domain_admin_token}"},
+        )
+        print("Approver 2 created!")
+
+        print("Setting one time passcode for Approver 2...")
+        passcode_res = requests.put(
+            f"{lock_keeper_url}/authorizing_entity/{APPROVER_2_NAME}/passcode",
+            headers={"Authorization": f"Bearer {domain_admin_token}"},
+        )
+        print("One time passcode set!")
+
+        print("Setting public key for Approver 2...")
+
+        # Convert the private key to a PEM encoded public key
+        approver_2_public_key = private_key_to_pem_public_key(approver_2_private_key)
+
+        req_body = {
+            "name": APPROVER_2_NAME,
+            "passcode": passcode_res.json()["passcode"],
+            "public_key": approver_2_public_key,
+        }
+        upload_path_parameter = passcode_res.json().get("upload_path_parameter")
+        res = requests.put(
+            f"{lock_keeper_url}/authorizing_entity/public_key/{upload_path_parameter}",
+            json=req_body,
+            headers={"Authorization": f"Bearer {domain_admin_token}"},
+        )
+        print(res.text)
+        print("Public key set!")
+    else:
+        print(f"Authorizing Entity '{APPROVER_2_NAME}' already exists!")
 
     print_header("Noop Policy Setup")
 
@@ -499,12 +589,12 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
         # {
         #     "policy_name": "approver_policy",
         #     "nonce": 2,
-        #     "domain_approvals": { "required": ["approver_auth_entity"], "optional": [] },
+        #     "domain_approvals": { "required": ["approver_1_auth_entity", "approver_2_auth_entity"], "optional": [] },
         #     "min_optional_approvals": 0
         # }
         req_body = {
-            "serialized_policy": "eyJwb2xpY3lfbmFtZSI6ImFwcHJvdmVyX3BvbGljeSIsIm5vbmNlIjoyLCJkb21haW5fYXBwcm92YWxzIjp7InJlcXVpcmVkIjpbImFwcHJvdmVyX2F1dGhfZW50aXR5Il0sIm9wdGlvbmFsIjpbXX0sIm1pbl9vcHRpb25hbF9hcHByb3ZhbHMiOjB9",
-            "signature": "MEUCIQC2W91ElBYyH4pxPOx96znQXPsQj/4h68jiubR4rEGamQIgOqzEhDvp8QfIoJ6+VrNtewCjFXuGACLgpLyB8ERN22U=",
+            "serialized_policy": "eyJwb2xpY3lfbmFtZSI6ImFwcHJvdmVyX3BvbGljeSIsIm5vbmNlIjoyLCJkb21haW5fYXBwcm92YWxzIjp7InJlcXVpcmVkIjpbImFwcHJvdmVyXzFfYXV0aF9lbnRpdHkiLCJhcHByb3Zlcl8yX2F1dGhfZW50aXR5Il0sIm9wdGlvbmFsIjpbXX0sIm1pbl9vcHRpb25hbF9hcHByb3ZhbHMiOjB9",
+            "signature": "MEQCID6uSbQzKREPq1Nf1NuiMwItpBl7rC8tR7HRMFOXudMrAiBjLSBmzlAymw3Rh5u9UTpRy3agoxosBn/zo2UDpuF5/A==",
         }
         res = requests.post(
             f"{lock_keeper_url}/policy",
@@ -581,9 +671,11 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
     signature = res.json().get("signature")
     print(f"Message signed! signature: {signature}")
 
-    print("Signing a typed message with approver policy...")
+    print("Signing a typed message with approver policy and two pre-approvals...")
     typed_data = get_mock_sign_request_typed_data()
-    authorizing_data = get_authorizing_data(typed_data, private_key)
+    authorizing_data = get_authorizing_data(
+        typed_data, approver_1_private_key, approver_2_private_key
+    )
 
     typed_data_json = json.dumps(typed_data)
     base_64_typed_data = base64.b64encode(typed_data_json.encode("utf-8")).decode(
@@ -591,7 +683,7 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
     )
     req_body = {
         "typed_data": base_64_typed_data,
-        "authorizing_data": [authorizing_data],
+        "authorizing_data": authorizing_data,
         "key_id": key_id,
         "message_type": "Standard",
         "policies": [APPROVER_POLICY_NAME],
@@ -602,6 +694,7 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password, key_file):
         json=req_body,
         headers={"Authorization": f"Bearer {service_provider_token}"},
     )
+    print(res.text)
     signature = res.json().get("signature")
     print(f"Message signed! signature: {signature}")
 
@@ -617,8 +710,7 @@ if __name__ == "__main__":
 
     parser.add_argument("lock_keeper_url", type=str, help="Lock Keeper URL")
     parser.add_argument("super_admin_password", type=str, help="Super Admin Password")
-    parser.add_argument("key_file", type=str, help="Path to the approver keystore file")
 
     args = parser.parse_args()
 
-    setup_lock_keeper(args.lock_keeper_url, args.super_admin_password, args.key_file)
+    setup_lock_keeper(args.lock_keeper_url, args.super_admin_password)
