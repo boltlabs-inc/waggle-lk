@@ -77,22 +77,6 @@ def login_status_code(login_url, username, password):
     return res.status_code
 
 
-def decrypt_keystore(key_file):
-    with open(key_file, "r") as file:
-        keystore = load_keyfile(file)
-
-    password = getpass.getpass(
-        f"Enter password for the approver keystore ({key_file}): "
-    )
-    try:
-        private_key = decode_keyfile_json(keystore, password.encode("utf-8"))
-    except ValueError:
-        print("Invalid approvers password, aborting process!")
-        return None
-
-    return private_key.hex()
-
-
 def get_approvers_private_keys_from_env():
     load_dotenv()
     env_vars = [
