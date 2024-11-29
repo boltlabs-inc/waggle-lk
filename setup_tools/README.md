@@ -21,7 +21,7 @@ And then execute the following steps to ensure that the Lock Keeper instance is 
 
 ## Usage
 
-Before using the tool, you need export two private keys that will be used as the approvers for the approver policy. Keep in mind that this should also be the keys to use when signing the claims in the game.
+Before using the tool, you need export some required environment variables. Keep in mind that the approvers private key should also be the keys to use when signing the claims in the waggle CLI.
 
 These env vars can also be set in a `.env` file in the `setup_tools` directory. To easily set these env vars, you can use the following command:
 
@@ -31,8 +31,12 @@ cp .env.example .env
 
 Then you can edit the `.env` file and set the values for the following env vars:
 
-- `APPROVER_1_PRIVATE_KEY`
-- `APPROVER_2_PRIVATE_KEY`
+| Env var | Description |
+| --- | --- |
+| `LOCK_KEEPER_URL` | The URL of the Lock Keeper instance |
+| `SUPER_ADMIN_PASSWORD` | The password of the super admin user, used to create a new Tenant |
+| `APPROVER_1_PRIVATE_KEY` | The private key of the first approver |
+| `APPROVER_2_PRIVATE_KEY` | The private key of the second approver |
 
 
 After that, you then need to setup your virtual environment and install the requirements:
@@ -47,5 +51,5 @@ pip install -r requirements.txt
 Then you can run the tool with the following command:
 
 ```bash
-python setup_lock_keeper.py LOCK_KEEPER_URL SUPER_ADMIN_PASSWORD
+python3 setup_lock_keeper.py
 ```

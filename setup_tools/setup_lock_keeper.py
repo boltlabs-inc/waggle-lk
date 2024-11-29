@@ -77,9 +77,11 @@ def login_status_code(login_url, username, password):
     return res.status_code
 
 
-def get_approvers_private_keys_from_env():
+def load_env_vars():
     load_dotenv()
     env_vars = [
+        "LOCK_KEEPER_URL",
+        "SUPER_ADMIN_PASSWORD",
         "APPROVER_1_PRIVATE_KEY",
         "APPROVER_2_PRIVATE_KEY",
     ]
@@ -92,7 +94,12 @@ def get_approvers_private_keys_from_env():
         print(f"Missing environment variables: {missing_vars}")
         exit(1)
 
-    return os.getenv("APPROVER_1_PRIVATE_KEY"), os.getenv("APPROVER_2_PRIVATE_KEY")
+    lk_url = os.getenv("LOCK_KEEPER_URL")
+    super_admin_password = os.getenv("SUPER_ADMIN_PASSWORD")
+    approver_1_private_key = os.getenv("APPROVER_1_PRIVATE_KEY")
+    approver_2_private_key = os.getenv("APPROVER_2_PRIVATE_KEY")
+
+    return lk_url, super_admin_password, approver_1_private_key, approver_2_private_key
 
 
 def private_key_to_pem_public_key(private_key):
@@ -207,12 +214,12 @@ def sign_metadata_with_approver(approver_private_key, hashed_metadata):
     return signature
 
 
-def setup_lock_keeper(lock_keeper_url, super_admin_password):
-
-    approver_1_private_key, approver_2_private_key = (
-        get_approvers_private_keys_from_env()
-    )
-
+def setup_lock_keeper(
+    lock_keeper_url,
+    super_admin_password,
+    approver_1_private_key,
+    approver_2_private_key,
+):
     print(f"Setting up Lock Keeper at {lock_keeper_url}")
 
     print_header("Lock Keeper Setup")
@@ -678,7 +685,6 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password):
         json=req_body,
         headers={"Authorization": f"Bearer {service_provider_token}"},
     )
-    print(res.text)
     signature = res.json().get("signature")
     print(f"Message signed! signature: {signature}")
 
@@ -686,15 +692,9 @@ def setup_lock_keeper(lock_keeper_url, super_admin_password):
 
 
 if __name__ == "__main__":
-
-    parser = argparse.ArgumentParser(
-        prog="Setup Lock Keeper",
-        description="Setup Lock Keeper with all required entities",
+    lk_url, super_admin_password, approver_1_private_key, approver_2_private_key = (
+        load_env_vars()
     )
-
-    parser.add_argument("lock_keeper_url", type=str, help="Lock Keeper URL")
-    parser.add_argument("super_admin_password", type=str, help="Super Admin Password")
-
-    args = parser.parse_args()
-
-    setup_lock_keeper(args.lock_keeper_url, args.super_admin_password)
+    setup_lock_keeper(
+        lk_url, super_admin_password, approver_1_private_key, approver_2_private_key
+    )
